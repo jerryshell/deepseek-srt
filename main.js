@@ -102,6 +102,16 @@
   };
 
   // ========================= 自动填入输入框 =========================
+  // React 中必须用原生 setter 才能触发其 onChange 同步到内部状态
+  const nativeTextareaSetter = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    "value",
+  ).set;
+  const nativeInputSetter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "value",
+  ).set;
+
   function findInput() {
     const sel = [
       'textarea[placeholder*="消息"]',
@@ -118,6 +128,15 @@
     return null;
   }
 
+  function setNativeValue(el, value) {
+    if (el.tagName === "TEXTAREA") {
+      nativeTextareaSetter.call(el, value);
+    } else if (el.tagName === "INPUT") {
+      nativeInputSetter.call(el, value);
+    }
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
   let pendingFill = false;
 
   function scheduleAutoFill() {
@@ -131,8 +150,7 @@
       const input = findInput();
       if (input) {
         if (input.tagName === "TEXTAREA" || input.tagName === "INPUT") {
-          input.value = promptText;
-          input.dispatchEvent(new Event("input", { bubbles: true }));
+          setNativeValue(input, promptText);
         } else if (input.getAttribute("contenteditable") === "true") {
           input.textContent = promptText;
           input.dispatchEvent(new Event("input", { bubbles: true }));
