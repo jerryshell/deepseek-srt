@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek SRT 上传助手
 // @namespace    http://tampermonkey.net/
-// @version      1.7
+// @version      1.9
 // @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt/.md 时自动填入提示词。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
@@ -159,34 +159,49 @@
         return el;
       }
     }
-    // 侧边栏收起时是纯图标按钮
-    return document.querySelector("aside [tabindex], nav [tabindex]") || null;
+    return null;
+  }
+
+  // 模拟官方快捷键开新对话（macOS 是 ⌘J，其他是 Ctrl+J）
+  function shortcutNewChat() {
+    const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "j",
+        bubbles: true,
+        ...(isMac ? { metaKey: true } : { ctrlKey: true }),
+      }),
+    );
   }
 
   let pendingFill = false;
+  let watchingSend = false;
 
-  // 发送后开启新对话：内容从有变空视为已发送
+  // 发送后开启新对话：监听 URL。DeepSeek 发送消息后进入会话页 /a/chat/s/...，
+  // 新对话后回到 /。从非会话页跳到会话页 = 消息已发送。
+  // ponytail: 假设用户流程是“开新对话→拖字幕→发送”，URL 每次从 / 跳到会话页；
+  // 若在已有会话里发消息（URL 不变）检测不到，需要时再兜输入框轮询。
   function watchSendThenNewChat() {
-    if (!newChatAfterSend || !autoFillEnabled) return;
-    let hadContent = false;
+    if (!newChatAfterSend || watchingSend) return;
+    watchingSend = true;
+    let lastUrl = location.href;
     const timer = setInterval(() => {
-      const input = findInput();
-      if (!input) return;
-      const val = input.value.trim();
-      if (val && !hadContent) hadContent = true;
-      if (hadContent && !val) {
-        clearInterval(timer);
+      const url = location.href;
+      if (url === lastUrl) return;
+      lastUrl = url;
+      if (!/\/a\/chat\/s\//.test(url)) return; // 只认进入会话页
+      clearInterval(timer);
+      watchingSend = false;
+      // 防抖：等路由稳定、DOM 重建完成再触发
+      setTimeout(() => {
         const btn = findNewChatButton();
         if (btn) {
           btn.click();
         } else {
-          // 兜底：官方快捷键 Ctrl+J
-          document.dispatchEvent(
-            new KeyboardEvent("keydown", { key: "j", ctrlKey: true, bubbles: true }),
-          );
+          shortcutNewChat();
         }
-      }
-    }, 500);
+      }, 300);
+    }, 300);
   }
 
   // 自动填空：等输入框渲染出来；已有内容则不覆盖
@@ -218,5 +233,5 @@
     setTimeout(retry, 500);
   }
 
-  console.log("[DeepSeek-SRT] ✅ v1.7 已就绪 — .srt→.txt + 自动填空 + 发送后新对话");
+  console.log("[DeepSeek-SRT] ✅ v1.9 已就绪 — .srt→.txt + 自动填空 + 发送后新对话(URL监听)");
 })();
