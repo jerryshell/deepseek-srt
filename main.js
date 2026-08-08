@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek SRT 上传助手
 // @namespace    http://tampermonkey.net/
-// @version      1.5
+// @version      1.6
 // @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt/.md 时自动填入提示词。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
@@ -18,15 +18,17 @@
   // === 配置 ===
   // 默认提示词
   const DEFAULT_PROMPT = "通俗易懂总结";
-  // 存储键：SRT 自动填空开关 / MD 自动填空开关 / 提示词
+  // 存储键：SRT 自动填空开关 / MD 自动填空开关 / 提示词 / 发送后新对话
   const STORAGE_KEY_ENABLED = "srtAutoFill";
   const STORAGE_KEY_MD = "mdAutoFill";
   const STORAGE_KEY_PROMPT = "srtPrompt";
+  const STORAGE_KEY_NEWCHAT = "newChatAfterSend";
 
-  // 读取持久化配置，SRT 默认开，MD 默认关
+  // 读取持久化配置，SRT 默认开，MD 默认关，发送后新对话默认关
   let autoFillEnabled = GM_getValue(STORAGE_KEY_ENABLED, true);
   let mdAutoFillEnabled = GM_getValue(STORAGE_KEY_MD, false);
   let promptText = GM_getValue(STORAGE_KEY_PROMPT, DEFAULT_PROMPT);
+  let newChatAfterSend = GM_getValue(STORAGE_KEY_NEWCHAT, false);
 
   // === 油猴菜单 ===
   // 菜单项无法动态更新，注册时就要定好，状态在标签里体现；修改后刷新页面让新标签生效
@@ -63,6 +65,14 @@
       location.reload();
     },
   );
+
+  // 发送后新对话开关（默认关）
+  GM_registerMenuCommand(newChatAfterSend ? "✅ 发送后新对话：开" : "❌ 发送后新对话：关", () => {
+    newChatAfterSend = !newChatAfterSend;
+    GM_setValue(STORAGE_KEY_NEWCHAT, newChatAfterSend);
+    alert("发送后新对话已" + (newChatAfterSend ? "开启 ✅" : "关闭 ❌"));
+    location.reload();
+  });
 
   // === 核心：拦截 File 名称，把 .srt 伪装成 .txt ===
   // 记录原生 getter，避免递归
@@ -162,6 +172,59 @@
 
   let pendingFill = false;
 
+  // 查找“开启新对话”按钮：DeepSeek 中它是一个 div+span，不是 button
+  function findNewChatButton() {
+    // 1. 文本/aria-label 含“开启新对话”或“New chat”的元素（div 或 button）
+    const all = document.querySelectorAll("div[tabindex], button");
+    for (const el of all) {
+      const t = (el.textContent || "").trim();
+      const aria = el.getAttribute("aria-label") || "";
+      if (
+        t === "开启新对话" ||
+        t === "New chat" ||
+        aria.includes("开启新对话") ||
+        aria.includes("New chat")
+      ) {
+        return el;
+      }
+    }
+    // 2. 侧边栏最顶部的图标按钮
+    const sidebarBtns = document.querySelectorAll("aside [tabindex], nav [tabindex]");
+    return sidebarBtns[0] || null;
+  }
+
+  // 发送后开启新对话：监控输入框，内容从有变空视为已发送
+  function watchSendThenNewChat() {
+    if (!newChatAfterSend || !autoFillEnabled) return;
+    let hadContent = false;
+    const timer = setInterval(() => {
+      const input = findInput();
+      if (!input) return;
+      const val = (
+        input.tagName === "TEXTAREA" || input.tagName === "INPUT"
+          ? input.value
+          : input.textContent || ""
+      ).trim();
+      if (val && !hadContent) hadContent = true;
+      if (hadContent && !val) {
+        clearInterval(timer);
+        const btn = findNewChatButton();
+        if (btn) {
+          btn.click();
+        } else {
+          // 兜底：模拟官方快捷键 Ctrl+J
+          document.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              key: "j",
+              ctrlKey: true,
+              bubbles: true,
+            }),
+          );
+        }
+      }
+    }, 500);
+  }
+
   // 自动填空：延迟等输入框渲染出来；已有内容则跳过，不覆盖
   function scheduleAutoFill() {
     if (pendingFill) return;
@@ -190,6 +253,7 @@
         }
         input.focus();
         pendingFill = false;
+        watchSendThenNewChat();
       } else if (attempts < maxAttempts) {
         // 输入框还没渲染，稍后重试
         setTimeout(retry, 300);
@@ -201,6 +265,6 @@
   }
 
   console.log(
-    "[DeepSeek-SRT] ✅ v1.5 已就绪 — .srt→.txt + .srt/.md 自动填空（菜单控制，已有内容不覆盖）",
+    "[DeepSeek-SRT] ✅ v1.6 已就绪 — .srt→.txt + .srt/.md 自动填空 + 发送后新对话（菜单控制，已有内容不覆盖）",
   );
 })();
