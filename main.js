@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek SRT 上传助手
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      1.7
 // @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt/.md 时自动填入提示词。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
@@ -16,70 +16,62 @@
   "use strict";
 
   // === 配置 ===
-  // 默认提示词
   const DEFAULT_PROMPT = "通俗易懂总结";
-  // 存储键：SRT 自动填空开关 / MD 自动填空开关 / 提示词 / 发送后新对话
-  const STORAGE_KEY_ENABLED = "srtAutoFill";
-  const STORAGE_KEY_MD = "mdAutoFill";
-  const STORAGE_KEY_PROMPT = "srtPrompt";
-  const STORAGE_KEY_NEWCHAT = "newChatAfterSend";
+  const STORAGE = {
+    ENABLED: "srtAutoFill",
+    MD: "mdAutoFill",
+    PROMPT: "srtPrompt",
+    NEWCHAT: "newChatAfterSend",
+  };
+  let autoFillEnabled = GM_getValue(STORAGE.ENABLED, true);
+  let mdAutoFillEnabled = GM_getValue(STORAGE.MD, false);
+  let promptText = GM_getValue(STORAGE.PROMPT, DEFAULT_PROMPT);
+  let newChatAfterSend = GM_getValue(STORAGE.NEWCHAT, false);
 
-  // 读取持久化配置，SRT 默认开，MD 默认关，发送后新对话默认关
-  let autoFillEnabled = GM_getValue(STORAGE_KEY_ENABLED, true);
-  let mdAutoFillEnabled = GM_getValue(STORAGE_KEY_MD, false);
-  let promptText = GM_getValue(STORAGE_KEY_PROMPT, DEFAULT_PROMPT);
-  let newChatAfterSend = GM_getValue(STORAGE_KEY_NEWCHAT, false);
+  // === 油猴菜单：开关注册一次，修改后刷新让新标签生效 ===
+  function registerToggle(label, key, get, set) {
+    GM_registerMenuCommand((get() ? "✅ " : "❌ ") + label + "：" + (get() ? "开" : "关"), () => {
+      set(!get());
+      GM_setValue(key, get());
+      location.reload();
+    });
+  }
+  registerToggle(
+    "自动填空",
+    STORAGE.ENABLED,
+    () => autoFillEnabled,
+    (v) => (autoFillEnabled = v),
+  );
+  registerToggle(
+    "自动填空（MD）",
+    STORAGE.MD,
+    () => mdAutoFillEnabled,
+    (v) => (mdAutoFillEnabled = v),
+  );
+  registerToggle(
+    "发送后新对话",
+    STORAGE.NEWCHAT,
+    () => newChatAfterSend,
+    (v) => (newChatAfterSend = v),
+  );
 
-  // === 油猴菜单 ===
-  // 菜单项无法动态更新，注册时就要定好，状态在标签里体现；修改后刷新页面让新标签生效
-
-  // SRT 自动填空开关
-  GM_registerMenuCommand(autoFillEnabled ? "✅ 自动填空：开" : "❌ 自动填空：关", () => {
-    autoFillEnabled = !autoFillEnabled;
-    GM_setValue(STORAGE_KEY_ENABLED, autoFillEnabled);
-    alert("自动填空已" + (autoFillEnabled ? "开启 ✅" : "关闭 ❌"));
-    // 刷新以更新菜单标签——重新注册会覆盖旧项
-    location.reload();
-  });
-
-  // 修改提示词
   GM_registerMenuCommand(
     "✏️ 修改提示词（当前：" + promptText.slice(0, 12) + (promptText.length > 12 ? "…" : "") + "）",
     () => {
       const input = prompt("拖入 SRT / MD 后自动填入的提示词：", promptText);
       if (input !== null && input.trim()) {
         promptText = input.trim();
-        GM_setValue(STORAGE_KEY_PROMPT, promptText);
+        GM_setValue(STORAGE.PROMPT, promptText);
         location.reload();
       }
     },
   );
 
-  // MD 自动填空开关（独立于 SRT）
-  GM_registerMenuCommand(
-    mdAutoFillEnabled ? "✅ 自动填空（MD）：开" : "❌ 自动填空（MD）：关",
-    () => {
-      mdAutoFillEnabled = !mdAutoFillEnabled;
-      GM_setValue(STORAGE_KEY_MD, mdAutoFillEnabled);
-      alert("MD 自动填空已" + (mdAutoFillEnabled ? "开启 ✅" : "关闭 ❌"));
-      location.reload();
-    },
-  );
-
-  // 发送后新对话开关（默认关）
-  GM_registerMenuCommand(newChatAfterSend ? "✅ 发送后新对话：开" : "❌ 发送后新对话：关", () => {
-    newChatAfterSend = !newChatAfterSend;
-    GM_setValue(STORAGE_KEY_NEWCHAT, newChatAfterSend);
-    alert("发送后新对话已" + (newChatAfterSend ? "开启 ✅" : "关闭 ❌"));
-    location.reload();
-  });
-
   // === 核心：拦截 File 名称，把 .srt 伪装成 .txt ===
-  // 记录原生 getter，避免递归
   const origNameDesc = Object.getOwnPropertyDescriptor(File.prototype, "name");
   const origTypeDesc = Object.getOwnPropertyDescriptor(File.prototype, "type");
 
-  // 拦截 name：.srt 触发自动填空并改成 .txt；.md 在开关开启时只填空不改名
+  // .srt 触发自动填空并改名；.md 在开关开启时只填空
   if (origNameDesc) {
     Object.defineProperty(File.prototype, "name", {
       get() {
@@ -95,7 +87,7 @@
     });
   }
 
-  // 拦截 type：.srt 伪装为 text/plain，绕过前端格式校验
+  // .srt 的 MIME 伪装为 text/plain，绕过前端格式校验
   if (origTypeDesc) {
     Object.defineProperty(File.prototype, "type", {
       get() {
@@ -106,8 +98,10 @@
     });
   }
 
-  // === 兜底：拦截 FormData，防止部分场景绕过 name 拦截 ===
-  function wrap(value) {
+  // === 关键：FormData 序列化不走 JS getter（Blink 读内部槽位）===
+  // File.prototype.name 拦截骗过前端校验，但服务器收到的是真 .srt 名，会报格式不支持。
+  // 必须在入 FormData 时替换成新的 File 对象。
+  function wrapSrt(value) {
     if (value instanceof File) {
       try {
         const name = origNameDesc.get.call(value);
@@ -117,40 +111,30 @@
             lastModified: value.lastModified,
           });
         }
-      } catch {} // 忽略异常，保持原值
+      } catch {}
     }
     return value;
   }
-  // append / set 都包一层，确保统一处理
   const fdProto = FormData.prototype;
   const origAppend = fdProto.append;
   fdProto.append = function (name, value, filename) {
-    return origAppend.call(this, name, wrap(value), filename);
+    return origAppend.call(this, name, wrapSrt(value), filename);
   };
   const origSet = fdProto.set;
   fdProto.set = function (name, value, filename) {
-    return origSet.call(this, name, wrap(value), filename);
+    return origSet.call(this, name, wrapSrt(value), filename);
   };
 
   // === 自动填入输入框 ===
   // React 受控组件必须用原生 setter 赋值并派发 input 事件，才能触发其 onChange
-  const nativeTextareaSetter = Object.getOwnPropertyDescriptor(
-    HTMLTextAreaElement.prototype,
-    "value",
-  ).set;
-  const nativeInputSetter = Object.getOwnPropertyDescriptor(
-    HTMLInputElement.prototype,
-    "value",
-  ).set;
+  const nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
 
   function findInput() {
-    // 按优先级查找聊天输入框
     const sel = [
       'textarea[placeholder*="消息"]',
       'textarea[placeholder*="Message"]',
       "#chat-input",
       '[role="textbox"]',
-      '[contenteditable="true"]',
       "textarea",
     ];
     for (const s of sel) {
@@ -160,21 +144,8 @@
     return null;
   }
 
-  function setNativeValue(el, value) {
-    // 用原生 setter 写入，再派发 input 事件让 React 感知
-    if (el.tagName === "TEXTAREA") {
-      nativeTextareaSetter.call(el, value);
-    } else if (el.tagName === "INPUT") {
-      nativeInputSetter.call(el, value);
-    }
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-  }
-
-  let pendingFill = false;
-
   // 查找“开启新对话”按钮：DeepSeek 中它是一个 div+span，不是 button
   function findNewChatButton() {
-    // 1. 文本/aria-label 含“开启新对话”或“New chat”的元素（div 或 button）
     const all = document.querySelectorAll("div[tabindex], button");
     for (const el of all) {
       const t = (el.textContent || "").trim();
@@ -188,23 +159,20 @@
         return el;
       }
     }
-    // 2. 侧边栏最顶部的图标按钮
-    const sidebarBtns = document.querySelectorAll("aside [tabindex], nav [tabindex]");
-    return sidebarBtns[0] || null;
+    // 侧边栏收起时是纯图标按钮
+    return document.querySelector("aside [tabindex], nav [tabindex]") || null;
   }
 
-  // 发送后开启新对话：监控输入框，内容从有变空视为已发送
+  let pendingFill = false;
+
+  // 发送后开启新对话：内容从有变空视为已发送
   function watchSendThenNewChat() {
     if (!newChatAfterSend || !autoFillEnabled) return;
     let hadContent = false;
     const timer = setInterval(() => {
       const input = findInput();
       if (!input) return;
-      const val = (
-        input.tagName === "TEXTAREA" || input.tagName === "INPUT"
-          ? input.value
-          : input.textContent || ""
-      ).trim();
+      const val = input.value.trim();
       if (val && !hadContent) hadContent = true;
       if (hadContent && !val) {
         clearInterval(timer);
@@ -212,20 +180,16 @@
         if (btn) {
           btn.click();
         } else {
-          // 兜底：模拟官方快捷键 Ctrl+J
+          // 兜底：官方快捷键 Ctrl+J
           document.dispatchEvent(
-            new KeyboardEvent("keydown", {
-              key: "j",
-              ctrlKey: true,
-              bubbles: true,
-            }),
+            new KeyboardEvent("keydown", { key: "j", ctrlKey: true, bubbles: true }),
           );
         }
       }
     }, 500);
   }
 
-  // 自动填空：延迟等输入框渲染出来；已有内容则跳过，不覆盖
+  // 自动填空：等输入框渲染出来；已有内容则不覆盖
   function scheduleAutoFill() {
     if (pendingFill) return;
     pendingFill = true;
@@ -236,26 +200,16 @@
       attempts++;
       const input = findInput();
       if (input) {
-        // 已有内容则不覆盖
-        const existing =
-          input.tagName === "TEXTAREA" || input.tagName === "INPUT"
-            ? input.value.trim()
-            : (input.textContent || "").trim();
-        if (existing) {
+        if (input.value.trim()) {
           pendingFill = false;
           return;
         }
-        if (input.tagName === "TEXTAREA" || input.tagName === "INPUT") {
-          setNativeValue(input, promptText);
-        } else if (input.getAttribute("contenteditable") === "true") {
-          input.textContent = promptText;
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-        }
+        nativeSetter.call(input, promptText);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
         input.focus();
         pendingFill = false;
         watchSendThenNewChat();
       } else if (attempts < maxAttempts) {
-        // 输入框还没渲染，稍后重试
         setTimeout(retry, 300);
       } else {
         pendingFill = false;
@@ -264,7 +218,5 @@
     setTimeout(retry, 500);
   }
 
-  console.log(
-    "[DeepSeek-SRT] ✅ v1.6 已就绪 — .srt→.txt + .srt/.md 自动填空 + 发送后新对话（菜单控制，已有内容不覆盖）",
-  );
+  console.log("[DeepSeek-SRT] ✅ v1.7 已就绪 — .srt→.txt + 自动填空 + 发送后新对话");
 })();
