@@ -582,10 +582,10 @@
         if (f?.status === "SUCCESS") {
           logMsg("XHR fetch_files: SUCCESS");
           batch.fileReady = true;
-          notifyFileReady(true);
+          notifyFileReady(true, batch.currentFileName);
         } else if (f?.status === "FAIL") {
           logMsg("XHR fetch_files: 服务器拒绝 (FAIL)");
-          notifyFileReady(false);
+          notifyFileReady(false, batch.currentFileName);
         }
       }
       if (short.startsWith("/api/v0/file/upload_file")) {
@@ -616,7 +616,7 @@
           if (biz.status === "SUCCESS" && !batch.fileReady) {
             logMsg("upload_file 即 SUCCESS，直接就绪");
             batch.fileReady = true;
-            notifyFileReady(true);
+            notifyFileReady(true, batch.currentFileName);
           }
         } catch {
           logMsg(
@@ -664,11 +664,11 @@
   // 上传就绪：等待 fetch_files SUCCESS（XHR 拦截或主动轮询）。
   // DOM chip 只说明 DeepSeek 已接收文件，不代表文件就绪（服务器繁忙时会延后）——
   // 所以 chip 出现后仍继续等 SUCCESS，发送才不会被 couldSubmit 吞掉。
-  let fileReadyWaiters = [];
-  function notifyFileReady(ok) {
-    const ws = fileReadyWaiters;
-    fileReadyWaiters = [];
-    ws.forEach((w) => w(ok));
+  let fileReadyWaiters = []; // {name, resolve}，按文件名匹配，并发 2 时互不误触
+  function notifyFileReady(ok, name) {
+    const target = name ? fileReadyWaiters.filter((w) => w.name === name) : fileReadyWaiters;
+    fileReadyWaiters = name ? fileReadyWaiters.filter((w) => w.name !== name) : [];
+    target.forEach((w) => w.resolve(ok));
   }
   // 主动 fetch_files 轮询：DeepSeek 前端可能不发 fetch，且 SUCCESS 前发送会被吞，故必须等到明确状态。
   // 返回停止函数。
@@ -676,7 +676,7 @@
     let timer = null;
     let netErrLogged = false; // 网络错误只打一次，避免刷屏
     const poll = async () => {
-      if (batch.fileReady) return; // XHR fetch_files 已确认，轮询自停
+      // 不自停：XHR SUCCESS 会触发 waiter（stop 清调度），在途请求多余但无害
       const id = batch.uploadId;
       if (!id) return (timer = setTimeout(poll, 2000));
       try {
@@ -721,19 +721,28 @@
   async function waitFileReady(name, timeoutMs) {
     if (batch.fileReady || batch.stop) return true;
     return new Promise((resolve) => {
-      fileReadyWaiters.push(resolve);
-      // 先给 DeepSeek 前端 2s 发 fetch_files 的机会，未发则由主动轮询接管
       let stop = null;
+      let done = false;
+      let timeoutId = null;
+      // 统一出口：resolve 后立刻清理超时与轮询，避免残留回调打噪音日志/误 resolve
+      const waiter = (ok) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timeoutId);
+        if (stop) stop();
+        fileReadyWaiters = fileReadyWaiters.filter((w) => w !== waiter);
+        resolve(ok);
+      };
+      fileReadyWaiters.push({ name, resolve: waiter });
+      timeoutId = setTimeout(() => {
+        logMsg("上传就绪等待超时，uploadId: " + (batch.uploadId || "空"));
+        waiter(false);
+      }, timeoutMs);
+      // 先给 DeepSeek 前端 2s 发 fetch_files 的机会，未发则由主动轮询接管
       setTimeout(() => {
         if (batch.fileReady) return;
-        stop = pollFileStatus(name, resolve);
+        stop = pollFileStatus(name, waiter);
       }, 2000);
-      setTimeout(() => {
-        if (stop) stop();
-        fileReadyWaiters = fileReadyWaiters.filter((w) => w !== resolve);
-        logMsg("上传就绪等待超时，uploadId: " + (batch.uploadId || "空"));
-        resolve(false);
-      }, timeoutMs);
     });
   }
 
