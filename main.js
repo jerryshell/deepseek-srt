@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek SRT 上传助手 + YouTube 字幕下载
 // @namespace    http://tampermonkey.net/
-// @version      3.2
+// @version      3.3
 // @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt/.md 时自动填入提示词。批量处理 MD 文件（并发 2 自动排队）。YouTube 页面添加“下载字幕”按钮。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
@@ -505,6 +505,8 @@
     queue: [],
     stop: false,
     fileReady: false,
+    fileReadyDom: false,
+    uploadId: "",
     currentFileName: "",
     sent: false,
     lastError: "",
@@ -565,10 +567,24 @@
             " | 期望: " +
             batch.currentFileName,
         );
-        const f = files.find((f) => (f.file_name || f.name) === batch.currentFileName);
+        const norm = (s) =>
+          String(s || "")
+            .replace(/\s+/g, " ")
+            .trim();
+        const f = files.find((f) => norm(f.file_name || f.name) === norm(batch.currentFileName));
         if (f?.status === "SUCCESS") batch.fileReady = true;
       }
-      if (short.startsWith("/api/v0/file/upload_file")) logMsg("upload_file -> " + xhr.status);
+      if (short.startsWith("/api/v0/file/upload_file")) {
+        logMsg("upload_file -> " + xhr.status);
+        try {
+          const d = JSON.parse(xhr.responseText);
+          const id = d?.data?.biz_data?.id;
+          if (id) {
+            batch.uploadId = id;
+            logMsg("upload_file id: " + id.slice(0, 24) + "…");
+          }
+        } catch {}
+      }
       if (url.includes("/api/v0/chat/completion") && xhr.status === 200) {
         // 生成完成信号以侧边栏标题为准（startSidebarCounter），这里不处理
       }
@@ -577,15 +593,56 @@
     }
   }
 
+  const normName = (s) =>
+    String(s || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  const shortName = (s) =>
+    normName(s)
+      .replace(/\.(md|srt|txt)$/i, "")
+      .slice(0, 25);
+
+  // 上传完成信号：DOM 附件 chip（放宽匹配，防截断）或 fetch_files SUCCESS。
+  // 主动轮询 fetch_files（DeepSeek 前端可能不发，脚本自己查，不依赖前端）。
+  async function waitForFileReady(name, timeoutMs) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (batch.fileReady || batch.fileReadyDom || batch.stop) return true;
+      const id = batch.uploadId;
+      if (id) {
+        try {
+          const r = await fetch("/api/v0/file/fetch_files?file_ids=" + encodeURIComponent(id), {
+            credentials: "include",
+          });
+          const d = await r.json();
+          const files = d?.data?.biz_data?.files || [];
+          const f = files.find((f) => normName(f.file_name || f.name) === normName(name));
+          if (f?.status === "SUCCESS") {
+            logMsg("主动 fetch_files: SUCCESS");
+            return true;
+          }
+          if (f?.status === "FAIL") {
+            logMsg("主动 fetch_files: 服务器拒绝 (FAIL)");
+            return false;
+          }
+        } catch {}
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    return false;
+  }
+
   // 上传完成信号：fetch_files 返回 SUCCESS，或附件 chip 出现在输入框附近（兜底）。
-  // MutationObserver 事件驱动，不轮询。返回 observer 供调用方清理。
+  // MutationObserver 事件驱动，不轮询。观察 body 保证节点存活（React 可能重建输入框容器）；
+  // 只检查新增/变更节点文本，避免全页扫描。返回 observer 供调用方清理。
   function watchFileAppear(name) {
     const input = findInput();
     if (!input) return null;
+    const needle = shortName(name); // 放宽匹配：chip 显示可能截断文件名
     const check = () => {
       let el = input.parentElement;
       for (let i = 0; i < 12 && el; i++) {
-        if (el.innerText?.includes(name)) return true;
+        if (el.innerText?.includes(needle)) return true;
         el = el.parentElement;
       }
       return false;
@@ -594,15 +651,27 @@
       batch.fileReadyDom = true;
       return null;
     }
-    let root = input;
-    for (let i = 0; i < 12 && root.parentElement; i++) root = root.parentElement;
-    const mo = new MutationObserver(() => {
-      if (check()) {
-        batch.fileReadyDom = true;
-        mo.disconnect();
+    const mo = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        if (m.type === "characterData") {
+          if (m.target.textContent?.includes(needle)) {
+            batch.fileReadyDom = true;
+            mo.disconnect();
+            return;
+          }
+        }
+        for (const node of m.addedNodes) {
+          const t =
+            node.nodeType === 3 ? node.textContent : node.nodeType === 1 ? node.innerText : "";
+          if (t?.includes(needle)) {
+            batch.fileReadyDom = true;
+            mo.disconnect();
+            return;
+          }
+        }
       }
     });
-    mo.observe(root, { childList: true, subtree: true, characterData: true });
+    mo.observe(document.body, { childList: true, subtree: true, characterData: true });
     return mo;
   }
 
@@ -652,9 +721,11 @@
     });
   }
 
-  // 确保输入框干净：会话页先回首页；首页有残留草稿（上次失败）则开新对话清除
-  async function ensureHomeInput() {
-    if (/\/a\/chat\/s\//.test(location.href)) {
+  // 确保输入框干净：会话页先回首页；首页有残留草稿则开新对话清除。
+  // force=true 时无条件开新对话（失败后清残留附件，防止文件叠加进同一会话）
+  async function ensureHomeInput(force) {
+    if (force || /\/a\/chat\/s\//.test(location.href)) {
+      logMsg(force ? "开新对话（强制清理残留）" : "开新对话（回首页）");
       const btn = findNewChatButton();
       if (btn) btn.click();
       else shortcutNewChat();
@@ -662,6 +733,7 @@
     }
     const input = findInput();
     if (input && input.value.trim()) {
+      logMsg("首页有残留草稿，开新对话清理");
       const btn = findNewChatButton();
       if (btn) btn.click();
       else shortcutNewChat();
@@ -689,8 +761,9 @@
     if (!injectFile(file)) throw new Error("未找到文件输入框");
     batch.fileReady = false;
     batch.fileReadyDom = false;
+    batch.uploadId = "";
     const mo = watchFileAppear(file.name);
-    const ready = await waitFor(() => batch.fileReady || batch.fileReadyDom || batch.stop, 20000);
+    const ready = await waitForFileReady(file.name, 30000);
     if (mo) mo.disconnect();
     if (batch.stop) throw new Error("已停止");
     if (!ready) {
@@ -848,6 +921,8 @@
     lastNewChatCount = countNewChatSessions();
     sidebarObserver = new MutationObserver(() => {
       const c = countNewChatSessions();
+      if (c === lastNewChatCount) return;
+      logMsg("侧边栏计数: " + lastNewChatCount + " → " + c);
       const delta = lastNewChatCount - c;
       lastNewChatCount = c;
       for (let i = 0; i < delta; i++) {
@@ -875,6 +950,7 @@
     const logBox = document.getElementById("ds-log");
     if (logBox) logBox.innerHTML = "";
     sidebarBaseline = countNewChatSessions(); // 历史「新对话」会话（用户手动开的）不计入并发
+    logMsg("侧边栏基线: " + sidebarBaseline);
     lastNewChatCount = 0;
     startSidebarCounter();
     setBatchBtnState();
@@ -897,6 +973,10 @@
           renderTaskList();
         }
         logMsg("失败: " + file.name + " - " + e.message);
+        // 失败后强制开新对话，清掉残留附件/草稿，防止下一个文件叠加进同一会话
+        try {
+          await ensureHomeInput(true);
+        } catch {}
       }
     }
     await waitFor(() => countNewChatSessions() === 0 || batch.stop, 7200 * 1000);
@@ -1245,8 +1325,4 @@
     container.appendChild(createDownloadButton("下载并关闭", true));
   }
   setInterval(ensureYoutubeButton, 2000);
-
-  console.log(
-    "[DeepSeek-SRT] ✅ v3.0 已就绪 — .srt→.txt + 自动填空 + 发送后新对话 + 批量处理 MD（Ctrl+Shift+U）+ YouTube 字幕下载",
-  );
 })();
