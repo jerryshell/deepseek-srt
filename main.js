@@ -307,26 +307,8 @@
       );
     return "就绪";
   }
-  setInterval(() => {
-    const panel = document.getElementById("ds-panel");
-    if (!panel) {
-      buildPanel();
-      return;
-    }
-    const status = panel.querySelector("#ds-status");
-    if (status) status.textContent = getStatusText();
-    // 进度条同步
-    const progress = panel.querySelector("#ds-progress");
-    const bar = progress?.firstChild;
-    if (progress && bar) {
-      if (batch.running && batch.total > 0) {
-        progress.style.display = "block";
-        bar.style.width = ((batch.done + batch.failed) / batch.total) * 100 + "%";
-      } else {
-        progress.style.display = "none";
-      }
-    }
-  }, 1500);
+
+  // 面板状态刷新：并入 logMsg（batch 每次变化必经点），不再用定时器轮询
 
   // === 核心：把 .srt 伪装成 .txt（拦截 File.name/type + FormData 替换）===
   const origNameDesc = Object.getOwnPropertyDescriptor(File.prototype, "name");
@@ -542,7 +524,8 @@
     });
   }
 
-  // 面板日志：进面板（ds-log）实时显示、可复制，同时输出到 console 备份
+  // 面板日志：进面板（ds-log）实时显示、可复制，同时输出到 console 备份。
+  // 同时刷新状态栏与进度条（batch 每次变化的必经点，替代定时轮询）。
   function logMsg(line) {
     const d = new Date();
     const ts =
@@ -559,6 +542,22 @@
       row.textContent = "[" + ts + "] " + line;
       box.appendChild(row);
       box.scrollTop = box.scrollHeight;
+    }
+    // 状态栏 + 进度条同步（面板可能尚未构建，getElementById 为空则跳过）
+    const panel = document.getElementById("ds-panel");
+    if (panel) {
+      const status = panel.querySelector("#ds-status");
+      if (status) status.textContent = getStatusText();
+      const progress = panel.querySelector("#ds-progress");
+      const bar = progress?.firstChild;
+      if (progress && bar) {
+        if (batch.running && batch.total > 0) {
+          progress.style.display = "block";
+          bar.style.width = ((batch.done + batch.failed) / batch.total) * 100 + "%";
+        } else {
+          progress.style.display = "none";
+        }
+      }
     }
   }
 
@@ -760,26 +759,33 @@
       let stop = null;
       let done = false;
       let timeoutId = null;
-      let errCheck = null;
+      let errMo = null; // 观察「请删除异常文件」提示（事件驱动，替代每秒轮询）
       // 统一出口：resolve 后立刻清理超时与轮询，避免残留回调打噪音日志/误 resolve
       const waiter = (ok) => {
         if (done) return;
         done = true;
         clearTimeout(timeoutId);
-        clearInterval(errCheck);
+        if (errMo) errMo.disconnect();
         if (stop) stop();
         fileReadyWaiters = fileReadyWaiters.filter((w) => w !== waiter);
         resolve(ok);
       };
       fileReadyWaiters.push({ name, resolve: waiter });
       // DeepSeek 对上传失败的文件显示「请删除异常文件再发送」，检测到立即判失败，不空等
-      errCheck = setInterval(() => {
+      // DeepSeek 对上传失败的文件显示「请删除异常文件再发送」——
+      // 用 MutationObserver 事件驱动（提示出现才回调），替代每秒全页 innerText 轮询
+      errMo = new MutationObserver(() => {
         if (done) return;
         if (document.body.innerText.includes("请删除异常文件")) {
           logMsg("检测到「请删除异常文件」提示，文件上传失败");
           waiter(false);
         }
-      }, 1000);
+      });
+      errMo.observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
       // upload_file 10s 无 id（服务器繁忙/响应异常）→ 快速失败，不空等 30s
       setTimeout(() => {
         if (done) return;
@@ -1308,6 +1314,7 @@
   // YT 播放字幕时自己会请求 api/timedtext（带 pot），从响应 URL 里提取缓存。
   // （uBO 拦动态 script 注入，但拦不住原型包装；YT 用 XHR 发 timedtext，见 read-frog 同款做法）
   const timedtextUrlCache = new Map(); // videoId -> 完整 timedtext URL（含 pot，YT 自己请求的）
+  const timedtextWaiters = new Map(); // videoId -> [resolve]，cacheTimedtextUrl 时直接 resolve（事件驱动）
   (function hookYoutubeNetwork() {
     function cacheTimedtextUrl(url) {
       try {
@@ -1316,6 +1323,11 @@
           const v = u.searchParams.get("v");
           if (v) {
             timedtextUrlCache.set(v, url);
+            const ws = timedtextWaiters.get(v);
+            if (ws?.length) {
+              timedtextWaiters.delete(v);
+              ws.forEach((r) => r(url));
+            }
           }
         }
       } catch (e) {
@@ -1390,14 +1402,19 @@
 
   function waitForTimedtextUrl(videoId) {
     return new Promise((resolve) => {
-      const start = Date.now();
-      const timeoutMs = 6000;
-      (function poll() {
-        const url = timedtextUrlCache.get(videoId);
-        if (url) return resolve(url);
-        if (Date.now() - start > timeoutMs) return resolve(null);
-        setTimeout(poll, 200);
-      })();
+      const existing = timedtextUrlCache.get(videoId);
+      if (existing) return resolve(existing);
+      const ws = timedtextWaiters.get(videoId) || [];
+      ws.push(resolve);
+      timedtextWaiters.set(videoId, ws);
+      // 超时兜底：6s 没等到就放弃（事件源 = YT 播放器发 timedtext 请求的 XHR load）
+      setTimeout(() => {
+        const arr = timedtextWaiters.get(videoId) || [];
+        const idx = arr.indexOf(resolve);
+        if (idx >= 0) arr.splice(idx, 1);
+        if (!arr.length) timedtextWaiters.delete(videoId);
+        resolve(null);
+      }, 6000);
     });
   }
 
@@ -1604,4 +1621,6 @@
       " | FormData 钩子: " +
       true,
   );
+  // 面板首次构建（状态刷新已并入 logMsg，无需定时器）
+  if (location.hostname === "chat.deepseek.com") buildPanel();
 })();
