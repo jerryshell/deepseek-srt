@@ -35,7 +35,7 @@
     const panel = document.createElement("div");
     panel.id = "ds-panel";
     panel.style.cssText =
-      "position:fixed;right:12px;top:64px;z-index:2147483000;width:190px;" +
+      "position:fixed;right:12px;top:64px;z-index:2147483000;width:280px;" +
       "background:rgba(24,24,27,.96);color:#fff;border-radius:10px;padding:10px 0;" +
       "font-size:12px;box-shadow:0 4px 20px rgba(0,0,0,.35);user-select:none;";
 
