@@ -998,6 +998,37 @@
     }
   }
 
+  // 多轨道时下拉选择（不弹系统 prompt）
+  function chooseTrack(tracks) {
+    return new Promise((resolve) => {
+      const select = document.createElement("select");
+      select.style.cssText =
+        "margin-top:10px;width:100%;background:#111;color:#e4e4e7;border:1px solid #3f3f46;" +
+        "border-radius:8px;padding:6px;font-size:12px;";
+      tracks.forEach((t, i) => {
+        const opt = document.createElement("option");
+        opt.value = String(i);
+        opt.textContent =
+          (t.name?.simpleText || t.languageCode) +
+          " (" +
+          t.languageCode +
+          ")" +
+          (t.kind === "asr" ? " [自动]" : "");
+        select.appendChild(opt);
+      });
+      const overlay = createOverlay("选择字幕轨道", select, [
+        ovlBtn("取消", false, () => {
+          overlay.remove();
+          resolve(null);
+        }),
+        ovlBtn("下载", true, () => {
+          overlay.remove();
+          resolve(tracks[Number(select.value)]);
+        }),
+      ]);
+    });
+  }
+
   async function onDownload(button, closeAfter) {
     button.disabled = true;
     button.textContent = "获取中...";
@@ -1015,27 +1046,8 @@
 
       let track = tracks[0];
       if (tracks.length > 1) {
-        const options = tracks
-          .map(
-            (t, i) =>
-              i +
-              1 +
-              ". " +
-              t.name?.simpleText +
-              " (" +
-              t.languageCode +
-              ")" +
-              (t.kind === "asr" ? " [自动]" : ""),
-          )
-          .join("\n");
-        const choice = prompt("选择字幕轨道（默认 1）:\n\n" + options, "1");
-        if (choice === null) return;
-        const index = parseInt(choice, 10) - 1;
-        if (!tracks[index]) {
-          alert("无效选择");
-          return;
-        }
-        track = tracks[index];
+        track = await chooseTrack(tracks);
+        if (!track) return;
       }
 
       const url = new URL(track.baseUrl);
