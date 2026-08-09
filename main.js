@@ -372,7 +372,9 @@
             lastModified: value.lastModified,
           });
         }
-      } catch {}
+      } catch (e) {
+        logMsg("SRT 伪装异常: " + e.message);
+      }
     }
     return value;
   }
@@ -445,6 +447,7 @@
   function watchSendThenNewChat() {
     if (!newChatAfterSend || watchingSend) return;
     watchingSend = true;
+    logMsg("发送后新对话: 开始监听 URL");
     let lastUrl = location.href;
     const timer = setInterval(() => {
       const url = location.href;
@@ -457,8 +460,10 @@
       setTimeout(() => {
         const btn = findNewChatButton();
         if (btn) {
+          logMsg("发送后新对话: 点击开启新对话按钮");
           btn.click();
         } else {
+          logMsg("发送后新对话: 未找到按钮，用快捷键 Ctrl+J");
           shortcutNewChat();
         }
       }, 300);
@@ -497,6 +502,7 @@
         setTimeout(retry, 300);
       } else {
         pendingFill = false;
+        logMsg("自动填空失败: " + maxAttempts + " 次未找到输入框");
       }
     }
     setTimeout(retry, 500);
@@ -542,7 +548,7 @@
     const ts =
       String(d.getMinutes()).padStart(2, "0") + ":" + String(d.getSeconds()).padStart(2, "0");
     batch.logs.push("[" + ts + "] " + line);
-    if (batch.logs.length > 400) batch.logs.shift();
+    if (batch.logs.length > 1000) batch.logs.shift();
     const box = document.getElementById("ds-log");
     if (box) {
       // 运行中自动展开日志区
@@ -574,6 +580,13 @@
             " | 期望: " +
             batch.currentFileName,
         );
+        // 完整响应体（截断）——繁忙/拒绝时 biz_error 等信息在这里面
+        logMsg(
+          "fetch_files 响应: " +
+            String(xhr.responseText || "")
+              .replace(/\s+/g, " ")
+              .slice(0, 300),
+        );
         const norm = (s) =>
           String(s || "")
             .replace(/\s+/g, " ")
@@ -590,7 +603,14 @@
       }
       if (short.startsWith("/api/v0/file/upload_file")) {
         if (xhr.status !== 200) {
-          logMsg("upload_file 非 200 (" + xhr.status + ")，服务器可能繁忙");
+          logMsg(
+            "upload_file 非 200 (" +
+              xhr.status +
+              "): " +
+              String(xhr.responseText || "")
+                .replace(/\s+/g, " ")
+                .slice(0, 300),
+          );
         }
         try {
           const d = JSON.parse(xhr.responseText);
@@ -648,9 +668,10 @@
           logMsg(
             "completion 响应: " +
               xhr.status +
-              "（发送失败）" +
-              " " +
-              String(xhr.responseText || "").slice(0, 120),
+              "（发送失败） " +
+              String(xhr.responseText || "")
+                .replace(/\s+/g, " ")
+                .slice(0, 500),
           );
         }
       }
@@ -714,6 +735,14 @@
           resolve(false);
           return;
         }
+        // 每轮打状态（PENDING/PARSING 等），可见服务器处理进度与恢复时机
+        logMsg(
+          "主动 fetch_files 轮询: " +
+            (f?.status || "未找到文件") +
+            " (" +
+            (f?.file_name || name).slice(0, 30) +
+            ")",
+        );
       } catch (e) {
         if (!netErrLogged) {
           netErrLogged = true;
@@ -1211,7 +1240,9 @@
         // 失败后强制开新对话，清掉残留附件/草稿，防止下一个文件叠加进同一会话
         try {
           await ensureHomeInput(true);
-        } catch {}
+        } catch (e2) {
+          logMsg("失败后清理异常: " + e2.message);
+        }
       }
     }
     await waitFor(() => countNewChatSessions() === 0 || batch.stop, 7200 * 1000);
@@ -1287,7 +1318,9 @@
             timedtextUrlCache.set(v, url);
           }
         }
-      } catch {}
+      } catch (e) {
+        logMsg("timedtext URL 缓存异常: " + e.message);
+      }
     }
 
     // XHR（YT 用 XHR 发 timedtext，实证有效）
@@ -1312,7 +1345,10 @@
             cacheTimedtextUrl(url);
             handleDeepSeekSignals(url, this);
           });
-        } catch {}
+        } catch (e) {
+          // XHR 包装失败 = 信号系统整体失效（sent/fetch/upload 全无），必须暴露
+          logMsg("XHR 包装异常: " + e.message);
+        }
         return origSend.apply(this, arguments);
       };
     }
