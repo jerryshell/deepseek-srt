@@ -471,9 +471,9 @@
     }, 300);
   }
 
-  // 自动填空：等输入框渲染出来；已有内容则不覆盖
+  // 自动填空：等输入框渲染出来；已有内容则不覆盖。批量期间（预览/运行）禁用，processFile 自己填空
   function scheduleAutoFill() {
-    if (batchPreviewActive) return; // 批量预览中不填空，避免污染输入框
+    if (batchPreviewActive || batch.running) return;
     if (pendingFill) return;
     logMsg("自动填空排队");
     pendingFill = true;
@@ -481,8 +481,8 @@
     let attempts = 0;
     const maxAttempts = 15;
     function retry() {
-      // 批量预览激活后取消排队中的填空（拦截器在 showBatchPreview 前访问了 f.name）
-      if (batchPreviewActive) {
+      // 批量预览/运行激活后取消排队中的填空（processFile 自己会填空）
+      if (batchPreviewActive || batch.running) {
         pendingFill = false;
         return;
       }
@@ -661,7 +661,7 @@
         fetchTimer = setTimeout(poll, 2000);
       };
       fetchTimer = setTimeout(poll, 2000);
-      const timer = setTimeout(() => {
+      setTimeout(() => {
         stopFetch();
         fileReadyWaiters = fileReadyWaiters.filter((w) => w !== resolve);
         logMsg("上传就绪等待超时，uploadId: " + (batch.uploadId || "空"));
