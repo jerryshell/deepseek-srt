@@ -734,6 +734,14 @@
         resolve(ok);
       };
       fileReadyWaiters.push({ name, resolve: waiter });
+      // upload_file 10s 无 id（服务器繁忙/响应异常）→ 快速失败，不空等 30s
+      setTimeout(() => {
+        if (done) return;
+        if (!batch.uploadId) {
+          logMsg("上传 10s 未拿到 uploadId，判定上传失败");
+          waiter(false);
+        }
+      }, 10000);
       timeoutId = setTimeout(() => {
         logMsg("上传就绪等待超时，uploadId: " + (batch.uploadId || "空"));
         waiter(false);
@@ -831,37 +839,52 @@
     return found;
   }
 
+  // 发送并确认：循环重试（服务器繁忙时 couldSubmit 可能延迟就绪，单次点击/Enter 会被吞）。
+  // 每轮：点按钮（2s 确认）→ 无确认则补 Enter（2.5s 确认）→ 再循环直到 sent 或 30s 超时。
+  // 确认依据 = completion 请求已发出（xhrProto.send 里置 batch.sent）或 URL 跳会话页。
+  // 不会双发：click/Enter 生效时 completion 同步发出（sent 立即置 true），未生效时无副作用。
   async function sendAndConfirm() {
-    // 优先点发送按钮（短确认）；找不到或未确认则 Enter 兜底（实测一直可靠）。
-    // 确认依据 = completion 请求已发出（xhrProto.send 里置 batch.sent）或 URL 跳会话页
     batch.sent = false;
-    const btn = findSendButton();
-    if (btn) {
-      logMsg("点击发送按钮");
-      btn.click();
-      const ok = await waitFor(
-        () => batch.sent || /\/a\/chat\/s\//.test(location.href) || batch.stop,
-        1500,
+    const deadline = Date.now() + 30000;
+    let round = 0;
+    while (Date.now() < deadline && !batch.stop) {
+      round++;
+      const btn = findSendButton();
+      if (btn) {
+        logMsg("点击发送按钮");
+        btn.click();
+        const ok = await waitFor(
+          () => batch.sent || /\/a\/chat\/s\//.test(location.href) || batch.stop,
+          2000,
+        );
+        if (ok || batch.stop) return !batch.stop;
+      } else {
+        logMsg("未找到发送按钮");
+      }
+      const input = findInput();
+      if (input) {
+        logMsg("改用 Enter 发送");
+        input.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "Enter",
+            code: "Enter",
+            keyCode: 13,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+        const ok = await waitFor(() => batch.sent || /\/a\/chat\/s\//.test(location.href), 2500);
+        if (ok) return true;
+      }
+      logMsg(
+        "发送未确认，重试（第 " +
+          round +
+          " 轮，剩余 " +
+          Math.max(0, Math.ceil((deadline - Date.now()) / 1000)) +
+          "s）",
       );
-      if (ok || batch.stop) return !batch.stop;
-    } else {
-      logMsg("未找到发送按钮");
     }
-    logMsg("改用 Enter 发送");
-    const input = findInput();
-    if (!input) return false;
-    input.dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key: "Enter",
-        code: "Enter",
-        keyCode: 13,
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-    const ok = await waitFor(() => batch.sent || /\/a\/chat\/s\//.test(location.href), 4000);
-    if (!ok) logMsg("Enter 后 4s 未确认发送（无 completion 且 URL 未跳转）");
-    return ok;
+    return false;
   }
 
   // 确保输入框干净：会话页先回首页；首页有残留草稿则开新对话清除。
