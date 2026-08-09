@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek SRT 上传助手 + YouTube 字幕下载
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      3.1
 // @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt/.md 时自动填入提示词。批量处理 MD 文件（并发 2 自动排队）。YouTube 页面添加“下载字幕”按钮。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
@@ -400,6 +400,7 @@
     running: false,
     queue: [],
     generating: 0,
+    stop: false,
     fileReady: false,
     currentFileName: "",
     sent: false,
@@ -428,7 +429,11 @@
   // XHR 信号（DeepSeek 全部走 axios/XHR）：fetch_files 轮询到 SUCCESS=文件就绪；
   // chat/completion 的 load=SSE 流结束=生成完成。
   function dbg(line) {
-    if (Array.isArray(batch.fileLog)) batch.fileLog.push(line);
+    if (!Array.isArray(batch.fileLog)) return;
+    const d = new Date();
+    const ts =
+      String(d.getMinutes()).padStart(2, "0") + ":" + String(d.getSeconds()).padStart(2, "0");
+    batch.fileLog.push("[" + ts + "] " + line);
   }
 
   function handleDeepSeekSignals(url, xhr) {
@@ -468,15 +473,33 @@
   }
 
   // 后备信号：附件 chip 出现在输入框附近（fetch_files 解析失败时兜底）
-  function fileVisibleInComposer(name) {
+  // 后备信号：附件 chip 出现在输入框附近（fetch_files 解析失败时兜底）。
+  // MutationObserver 事件驱动，不轮询。返回 observer 供调用方清理。
+  function watchFileAppear(name) {
     const input = findInput();
-    if (!input) return false;
-    let el = input.parentElement;
-    for (let i = 0; i < 6 && el; i++) {
-      if (el.innerText?.includes(name)) return true;
-      el = el.parentElement;
+    if (!input) return null;
+    const check = () => {
+      let el = input.parentElement;
+      for (let i = 0; i < 12 && el; i++) {
+        if (el.innerText?.includes(name)) return true;
+        el = el.parentElement;
+      }
+      return false;
+    };
+    if (check()) {
+      batch.fileReadyDom = true;
+      return null;
     }
-    return false;
+    let root = input;
+    for (let i = 0; i < 12 && root.parentElement; i++) root = root.parentElement;
+    const mo = new MutationObserver(() => {
+      if (check()) {
+        batch.fileReadyDom = true;
+        mo.disconnect();
+      }
+    });
+    mo.observe(root, { childList: true, subtree: true, characterData: true });
+    return mo;
   }
 
   function injectFile(file) {
@@ -502,8 +525,11 @@
     batch.sent = false;
     const btn = findSendButton();
     if (btn) btn.click();
-    return waitFor(() => batch.sent || /\/a\/chat\/s\//.test(location.href), 2500).then((ok) => {
-      if (ok) return true;
+    return waitFor(
+      () => batch.sent || /\/a\/chat\/s\//.test(location.href) || batch.stop,
+      2500,
+    ).then((ok) => {
+      if (ok || batch.stop) return !batch.stop;
       const input = findInput();
       if (!input) return false;
       input.dispatchEvent(
@@ -525,7 +551,7 @@
       const btn = findNewChatButton();
       if (btn) btn.click();
       else shortcutNewChat();
-      await waitFor(() => !/\/a\/chat\/s\//.test(location.href), 4000);
+      await waitFor(() => !/\/a\/chat\/s\//.test(location.href), 2500);
     }
     const input = findInput();
     if (input && input.value.trim()) {
@@ -535,7 +561,7 @@
       await waitFor(() => {
         const el = findInput();
         return !el || !el.value.trim();
-      }, 4000);
+      }, 2500);
     }
   }
 
@@ -556,7 +582,11 @@
     batch.currentFileName = file.name;
     if (!injectFile(file)) throw new Error("未找到文件输入框");
     batch.fileReady = false;
-    const ready = await waitFor(() => batch.fileReady || fileVisibleInComposer(file.name), 20000);
+    batch.fileReadyDom = false;
+    const mo = watchFileAppear(file.name);
+    const ready = await waitFor(() => batch.fileReady || batch.fileReadyDom || batch.stop, 20000);
+    if (mo) mo.disconnect();
+    if (batch.stop) throw new Error("已停止");
     if (!ready) {
       batch.debug.push("【" + file.name + "】", ...batch.fileLog);
       throw new Error("上传超时（附件区未出现文件）");
