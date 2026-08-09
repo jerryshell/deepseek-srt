@@ -611,6 +611,13 @@
           } else {
             logMsg("upload_file 响应无 id，可能失败");
           }
+          // 服务器直接回 SUCCESS（无需 PENDING→fetch_files 流程）时立即放行，
+          // 否则前端可能不发 fetch_files，会一直等到超时
+          if (biz.status === "SUCCESS" && !batch.fileReady) {
+            logMsg("upload_file 即 SUCCESS，直接就绪");
+            batch.fileReady = true;
+            notifyFileReady(true);
+          }
         } catch {
           logMsg(
             "upload_file 响应解析失败: " +
@@ -675,6 +682,8 @@
       try {
         const r = await fetch("/api/v0/file/fetch_files?file_ids=" + encodeURIComponent(id), {
           credentials: "include",
+          // 服务器繁忙时请求可能挂起，8s 无响应则放弃本轮重试（否则轮询死掉）
+          signal: AbortSignal.timeout(8000),
         });
         if (!r.ok) {
           if (!netErrLogged) {
