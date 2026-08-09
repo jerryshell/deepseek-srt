@@ -154,8 +154,10 @@
         return;
       }
       if (batch.tasks.length && batch.pendingFiles?.length) {
+        logMsg("开始处理 " + batch.tasks.length + " 个文件");
         runBatch(batch.pendingFiles);
       } else {
+        logMsg("打开批量文件选择器");
         pickBatchFiles();
       }
     });
@@ -441,6 +443,8 @@
 
   let pendingFill = false;
   let watchingSend = false;
+  // 批量预览激活时禁止自动填空（showBatchPreview 读取 f.name 会误触 File getter）
+  let batchPreviewActive = false;
 
   // 发送后开新对话：监听 URL。DeepSeek 发消息后进会话页 /a/chat/s/...，开新对话回 /。
   // 注意：若在已有会话里发消息（URL 不变）则检测不到。
@@ -469,12 +473,19 @@
 
   // 自动填空：等输入框渲染出来；已有内容则不覆盖
   function scheduleAutoFill() {
+    if (batchPreviewActive) return; // 批量预览中不填空，避免污染输入框
     if (pendingFill) return;
+    logMsg("自动填空排队");
     pendingFill = true;
 
     let attempts = 0;
     const maxAttempts = 15;
     function retry() {
+      // 批量预览激活后取消排队中的填空（拦截器在 showBatchPreview 前访问了 f.name）
+      if (batchPreviewActive) {
+        pendingFill = false;
+        return;
+      }
       attempts++;
       const input = findInput();
       if (input) {
@@ -485,6 +496,7 @@
         nativeSetter.call(input, promptText);
         input.dispatchEvent(new Event("input", { bubbles: true }));
         input.focus();
+        logMsg("已自动填提示词");
         pendingFill = false;
         watchSendThenNewChat();
       } else if (attempts < maxAttempts) {
@@ -573,6 +585,7 @@
             .trim();
         const f = files.find((f) => norm(f.file_name || f.name) === norm(batch.currentFileName));
         if (f?.status === "SUCCESS") {
+          logMsg("XHR fetch_files: SUCCESS");
           batch.fileReady = true;
           notifyFileReady(true);
         }
@@ -651,6 +664,7 @@
       const timer = setTimeout(() => {
         stopFetch();
         fileReadyWaiters = fileReadyWaiters.filter((w) => w !== resolve);
+        logMsg("上传就绪等待超时，uploadId: " + (batch.uploadId || "空"));
         resolve(false);
       }, timeoutMs);
     });
@@ -663,15 +677,19 @@
     const input = findInput();
     if (!input) return null;
     const needle = shortName(name); // 放宽匹配：chip 显示可能截断文件名
+    const inPanel = (el) => el && el.nodeType === 1 && !!el.closest?.("#ds-panel");
     const check = () => {
       let el = input.parentElement;
-      for (let i = 0; i < 12 && el; i++) {
+      // 只查输入框附近的附件区（最多 8 层，不含 body——避免面板任务列表里的文件名误匹配）
+      for (let i = 0; i < 8 && el && el !== document.body; i++) {
+        if (inPanel(el)) break;
         if (el.innerText?.includes(needle)) return true;
         el = el.parentElement;
       }
       return false;
     };
     if (check()) {
+      logMsg("附件区已见文件名（初始检查）");
       batch.fileReadyDom = true;
       notifyFileReady(true);
       return null;
@@ -679,7 +697,9 @@
     const mo = new MutationObserver((mutations) => {
       for (const m of mutations) {
         if (m.type === "characterData") {
+          if (inPanel(m.target)) continue;
           if (m.target.textContent?.includes(needle)) {
+            logMsg("附件区已见文件名（DOM 变更）");
             batch.fileReadyDom = true;
             notifyFileReady(true);
             mo.disconnect();
@@ -687,9 +707,11 @@
           }
         }
         for (const node of m.addedNodes) {
+          if (inPanel(node)) continue;
           const t =
             node.nodeType === 3 ? node.textContent : node.nodeType === 1 ? node.innerText : "";
           if (t?.includes(needle)) {
+            logMsg("附件区已见文件名（DOM 变更）");
             batch.fileReadyDom = true;
             notifyFileReady(true);
             mo.disconnect();
@@ -713,65 +735,43 @@
     return true;
   }
 
+  // DeepSeek 发送按钮：圆形图标按钮（无 aria-label/title，tooltip 是自定义组件）。
+  // 按位置+形状匹配：输入框附近范围内最后一个圆形小按钮（发送按钮在输入区最右）。
   function findSendButton() {
-    const els = document.querySelectorAll('button, div[role="button"], [aria-label], [title]');
-    for (const el of els) {
-      const hint = (el.getAttribute("aria-label") || "") + (el.getAttribute("title") || "");
-      if (/发送|send/i.test(hint)) return el;
+    const input = findInput();
+    if (!input) return null;
+    let root = input;
+    for (let i = 0; i < 6 && root.parentElement; i++) root = root.parentElement;
+    const btns = root.querySelectorAll('button, [role="button"]');
+    let found = null;
+    for (const b of btns) {
+      if (b.closest("#ds-panel")) continue;
+      const r = b.getBoundingClientRect();
+      if (r.width < 60 && r.height < 60) {
+        const cs = getComputedStyle(b);
+        if (cs.borderRadius === "50%" || /%/.test(cs.borderRadius)) found = b;
+      }
     }
-    return null;
-  }
-
-  // 等发送按钮可用：MutationObserver 监听页面变化（disabled/class 属性或节点重建），事件驱动不轮询
-  function waitSendEnabled(timeoutMs) {
-    return new Promise((resolve) => {
-      const check = () => {
-        if (batch.stop) return true;
-        const b = findSendButton();
-        if (!b) return false;
-        const disabled =
-          b.disabled === true ||
-          b.getAttribute("aria-disabled") === "true" ||
-          b.className?.includes?.("disabled");
-        return !disabled;
-      };
-      if (check()) return resolve(true);
-      const mo = new MutationObserver(() => {
-        if (check()) {
-          mo.disconnect();
-          resolve(true);
-        }
-      });
-      mo.observe(document.body, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ["disabled", "class", "aria-disabled"],
-      });
-      const timer = setTimeout(() => {
-        mo.disconnect();
-        resolve(check());
-      }, timeoutMs);
-    });
+    return found;
   }
 
   async function sendAndConfirm() {
-    // 先等发送按钮可用（DeepSeek 文件未上传完成时按钮禁用，点击无效白等）；
-    // 点按钮后 1.5s 未确认则补一次 Enter。
+    // 优先点发送按钮（短确认）；找不到或未确认则 Enter 兜底（实测一直可靠）。
     // 确认依据 = completion 请求已发出（xhrProto.send 里置 batch.sent）或 URL 跳会话页
     batch.sent = false;
-    const enabled = await waitSendEnabled(10000);
-    if (batch.stop) return false;
-    logMsg(enabled ? "发送按钮可用，点击发送" : "发送按钮 10s 内未变为可用，直接尝试");
     const btn = findSendButton();
-    if (btn) btn.click();
-    else logMsg("未找到发送按钮");
-    const ok = await waitFor(
-      () => batch.sent || /\/a\/chat\/s\//.test(location.href) || batch.stop,
-      1500,
-    );
-    if (ok || batch.stop) return !batch.stop;
-    logMsg("发送未确认，改用 Enter");
+    if (btn) {
+      logMsg("点击发送按钮");
+      btn.click();
+      const ok = await waitFor(
+        () => batch.sent || /\/a\/chat\/s\//.test(location.href) || batch.stop,
+        1500,
+      );
+      if (ok || batch.stop) return !batch.stop;
+    } else {
+      logMsg("未找到发送按钮");
+    }
+    logMsg("改用 Enter 发送");
     const input = findInput();
     if (!input) return false;
     input.dispatchEvent(
@@ -794,7 +794,8 @@
       const btn = findNewChatButton();
       if (btn) btn.click();
       else shortcutNewChat();
-      await waitFor(() => !/\/a\/chat\/s\//.test(location.href), 2500);
+      const home = await waitFor(() => !/\/a\/chat\/s\//.test(location.href), 2500);
+      if (!home) logMsg("回首页等待超时，仍停留在会话页");
     }
     const input = findInput();
     if (input && input.value.trim()) {
@@ -950,7 +951,9 @@
   }
 
   function clearTasks() {
+    batchPreviewActive = false;
     batch.pendingFiles = null;
+    logMsg("任务列表已清空");
     batch.tasks = [];
     const box = document.getElementById("ds-taskbox");
     if (box) box.style.display = "none";
@@ -958,7 +961,9 @@
   }
 
   function showBatchPreview(files) {
+    batchPreviewActive = true;
     batch.pendingFiles = files;
+    logMsg("预览 " + files.length + " 个文件");
     batch.tasks = files.map((f) => ({ name: f.name, status: "等待" }));
     const box = document.getElementById("ds-taskbox");
     if (box) box.style.display = "block";
@@ -1004,6 +1009,7 @@
   // 批量主流程：排队 + 并发闸 + 失败记录。完成标记由 sidebarObserver 驱动。
   async function runBatch(files) {
     if (batch.running) return;
+    batchPreviewActive = false;
     batch.running = true;
     batch.stop = false;
     batch.queue = [...files];
@@ -1084,7 +1090,13 @@
         return;
       const files = [...t.files];
       if (files.length < 2) return;
-      if (!files.every((f) => /\.(md|srt)$/i.test(f.name))) return;
+      // 先锁批量预览再访问 f.name（getter 会触发自动填空，此时 showBatchPreview 还没跑）
+      batchPreviewActive = true;
+      if (!files.every((f) => /(\.md|\.srt)$/i.test(f.name))) {
+        batchPreviewActive = false;
+        return;
+      }
+      logMsg("拦截批量文件选择: " + files.length + " 个");
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();
@@ -1131,7 +1143,10 @@
         try {
           const url = String(this.responseURL || this.__ytSrtUrl || "");
           // completion 请求发出 = 消息已成功发送（比 URL 跳转更可靠）
-          if (url.includes("/api/v0/chat/completion") && batch.running) batch.sent = true;
+          if (url.includes("/api/v0/chat/completion") && batch.running) {
+            batch.sent = true;
+            logMsg("completion 请求已发出");
+          }
           this.addEventListener("load", () => {
             const url = this.responseURL || this.__ytSrtUrl || "";
             cacheTimedtextUrl(url);
