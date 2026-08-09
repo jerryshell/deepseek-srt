@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek SRT 上传助手 + YouTube 字幕下载
 // @namespace    http://tampermonkey.net/
-// @version      2.8
+// @version      2.9
 // @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt/.md 时自动填入提示词。YouTube 页面添加“下载字幕”按钮。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
@@ -374,14 +374,21 @@
     URL.revokeObjectURL(link.href);
   }
 
-  // 生成 SRT 并触发下载（两个下载路径共用）
-  function finishDownload(playerResponse, events) {
+  // 生成 SRT 并触发下载；closeAfter 时尝试关闭标签页
+  function finishDownload(playerResponse, events, closeAfter) {
     const srt = buildSrt(events);
     const title = sanitizeFilename(playerResponse?.videoDetails?.title || "");
     downloadSrt(srt, title + ".srt");
+    if (closeAfter) {
+      window.close();
+      // 浏览器禁止关闭用户打开的标签页时，页面还在，此时提示
+      setTimeout(() => {
+        if (!window.closed) alert("浏览器不允许自动关闭页面，请手动关闭标签");
+      }, 800);
+    }
   }
 
-  async function onDownload(button) {
+  async function onDownload(button, closeAfter) {
     button.disabled = true;
     button.textContent = "获取中...";
     try {
@@ -439,7 +446,7 @@
             try {
               const cachedEvents = JSON.parse(cachedText).events || [];
               if (cachedEvents.length > 0) {
-                finishDownload(playerResponse, cachedEvents);
+                finishDownload(playerResponse, cachedEvents, closeAfter);
                 return;
               }
             } catch {
@@ -469,13 +476,25 @@
         return;
       }
 
-      finishDownload(playerResponse, events);
+      finishDownload(playerResponse, events, closeAfter);
     } catch (error) {
       alert("下载失败: " + error.message);
     } finally {
       button.disabled = false;
-      button.textContent = "下载字幕";
+      button.textContent = closeAfter ? "下载并关闭" : "下载字幕";
     }
+  }
+
+  function createDownloadButton(text, closeAfter) {
+    const button = document.createElement("button");
+    button.textContent = text;
+    button.style.cssText =
+      "margin-left:12px;align-self:center;flex-shrink:0;" +
+      "padding:6px 14px;border:none;border-radius:18px;" +
+      "background:#065fd4;color:#fff;font-size:13px;font-weight:500;" +
+      "cursor:pointer;white-space:nowrap;";
+    button.addEventListener("click", () => onDownload(button, closeAfter));
+    return button;
   }
 
   function ensureYoutubeButton() {
@@ -487,22 +506,16 @@
     if (!titleEl) return;
     const container = titleEl.closest("#title") || titleEl.parentElement;
 
-    const button = document.createElement("button");
-    button.id = "yt-srt-download-btn";
-    button.textContent = "下载字幕";
-    button.style.cssText =
-      "margin-left:12px;align-self:center;flex-shrink:0;" +
-      "padding:6px 14px;border:none;border-radius:18px;" +
-      "background:#065fd4;color:#fff;font-size:13px;font-weight:500;" +
-      "cursor:pointer;white-space:nowrap;";
     // 标题容器改成横向 flex，按钮才能跟在标题右侧
     container.style.cssText = "display:flex;align-items:center;flex-direction:row;flex-wrap:wrap;";
-    button.addEventListener("click", () => onDownload(button));
-    container.appendChild(button);
+    const btnDownload = createDownloadButton("下载字幕", false);
+    btnDownload.id = "yt-srt-download-btn";
+    container.appendChild(btnDownload);
+    container.appendChild(createDownloadButton("下载并关闭", true));
   }
   setInterval(ensureYoutubeButton, 2000);
 
   console.log(
-    "[DeepSeek-SRT] ✅ v2.8 已就绪 — .srt→.txt + 自动填空 + 发送后新对话 + YouTube 字幕下载",
+    "[DeepSeek-SRT] ✅ v2.9 已就绪 — .srt→.txt + 自动填空 + 发送后新对话 + YouTube 字幕下载",
   );
 })();
