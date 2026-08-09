@@ -9,7 +9,6 @@
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=deepseek.com
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
 // @run-at       document-start
 // ==/UserScript==
@@ -99,12 +98,14 @@
     promptLabel.style.cssText =
       labelStyle + "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
     const paintPrompt = () => {
-      promptLabel.textContent =
-        "提示词: " + (promptText.length > 8 ? promptText.slice(0, 8) + "…" : promptText);
+      promptLabel.textContent = "提示词: " + promptText; // CSS ellipsis 截断
     };
     paintPrompt();
     promptRow.appendChild(promptLabel);
-    promptRow.appendChild(editIcon());
+    const editIc = document.createElement("span");
+    editIc.textContent = "✎";
+    editIc.style.cssText = "color:#71717a;margin-left:6px;flex-shrink:0;";
+    promptRow.appendChild(editIc);
     // 点击 → 行内编辑（替换为输入框，回车/失焦保存）
     promptRow.addEventListener("click", () => {
       const input = document.createElement("input");
@@ -134,13 +135,6 @@
         if (e.key === "Escape") input.replaceWith(promptLabel);
       });
     });
-
-    function editIcon() {
-      const ic = document.createElement("span");
-      ic.textContent = "✎";
-      ic.style.cssText = "color:#71717a;margin-left:6px;flex-shrink:0;";
-      return ic;
-    }
 
     const batchBtn = document.createElement("button");
     batchBtn.id = "ds-batch-btn";
@@ -274,7 +268,6 @@
       logTitle.textContent = show ? "运行日志 ▾" : "运行日志 ▸";
     };
     logHead.addEventListener("click", () => toggleLog(logBox.style.display === "none"));
-    window.__dsToggleLog = toggleLog;
 
     document.body.appendChild(panel);
     return statusRow;
@@ -552,13 +545,14 @@
     const box = document.getElementById("ds-log");
     if (box) {
       // 运行中自动展开日志区
-      if (typeof window.__dsToggleLog === "function") window.__dsToggleLog(true);
+      box.style.display = "block";
+      const head = box.previousElementSibling;
+      if (head?.firstChild) head.firstChild.textContent = "运行日志 ▾";
       const row = document.createElement("div");
       row.textContent = "[" + ts + "] " + line;
       box.appendChild(row);
       box.scrollTop = box.scrollHeight;
     }
-    console.log("[批量]", line);
   }
 
   // DeepSeek XHR 信号：fetch_files 确认上传成功，upload_file 记录日志。
@@ -855,41 +849,67 @@
     logMsg("已发送: " + file.name);
   }
 
-  // === 通用浮层（批量结果弹窗已移除，仍用于 YouTube 轨道选择）===
-  function createOverlay(titleText, contentEl, footerBtns) {
-    const overlay = document.createElement("div");
-    overlay.style.cssText =
-      "position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2147483001;" +
-      "display:flex;align-items:center;justify-content:center;";
-    const box = document.createElement("div");
-    box.style.cssText =
-      "background:#18181b;color:#fff;border-radius:12px;padding:16px;width:440px;max-height:75vh;" +
-      "display:flex;flex-direction:column;font-size:12px;box-shadow:0 8px 40px rgba(0,0,0,.5);";
-    const title = document.createElement("div");
-    title.textContent = titleText;
-    title.style.cssText =
-      "font-weight:600;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,.12);";
-    box.appendChild(title);
-    box.appendChild(contentEl);
-    if (footerBtns.length) {
+  // 多轨道时下拉选择（不弹系统 prompt）
+  function chooseTrack(tracks) {
+    return new Promise((resolve) => {
+      const select = document.createElement("select");
+      select.style.cssText =
+        "margin-top:10px;width:100%;background:#111;color:#e4e4e7;border:1px solid #3f3f46;" +
+        "border-radius:8px;padding:6px;font-size:12px;";
+      tracks.forEach((t, i) => {
+        const opt = document.createElement("option");
+        opt.value = String(i);
+        opt.textContent =
+          (t.name?.simpleText || t.languageCode) +
+          " (" +
+          t.languageCode +
+          ")" +
+          (t.kind === "asr" ? " [自动]" : "");
+        select.appendChild(opt);
+      });
+      // 轨道选择浮层（内联，唯一调用者）
+      const overlay = document.createElement("div");
+      overlay.style.cssText =
+        "position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2147483001;" +
+        "display:flex;align-items:center;justify-content:center;";
+      const box = document.createElement("div");
+      box.style.cssText =
+        "background:#18181b;color:#fff;border-radius:12px;padding:16px;width:440px;" +
+        "max-height:75vh;display:flex;flex-direction:column;font-size:12px;" +
+        "box-shadow:0 8px 40px rgba(0,0,0,.5);";
+      const title = document.createElement("div");
+      title.textContent = "选择字幕轨道";
+      title.style.cssText =
+        "font-weight:600;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,.12);";
       const row = document.createElement("div");
       row.style.cssText = "display:flex;gap:8px;justify-content:flex-end;margin-top:12px;";
-      footerBtns.forEach((b) => row.appendChild(b));
+      const mkBtn = (text, primary, onClick) => {
+        const b = document.createElement("button");
+        b.textContent = text;
+        b.style.cssText =
+          "padding:6px 16px;border:none;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;" +
+          (primary ? "background:#4d6bfe;color:#fff;" : "background:#3f3f46;color:#e4e4e7;");
+        b.addEventListener("click", onClick);
+        return b;
+      };
+      row.appendChild(
+        mkBtn("取消", false, () => {
+          overlay.remove();
+          resolve(null);
+        }),
+      );
+      row.appendChild(
+        mkBtn("下载", true, () => {
+          overlay.remove();
+          resolve(tracks[Number(select.value)]);
+        }),
+      );
+      box.appendChild(title);
+      box.appendChild(select);
       box.appendChild(row);
-    }
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
-    return overlay;
-  }
-
-  function ovlBtn(text, primary, onClick) {
-    const b = document.createElement("button");
-    b.textContent = text;
-    b.style.cssText =
-      "padding:6px 16px;border:none;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;" +
-      (primary ? "background:#4d6bfe;color:#fff;" : "background:#3f3f46;color:#e4e4e7;");
-    b.addEventListener("click", onClick);
-    return b;
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+    });
   }
 
   // === 任务列表（面板内）===
@@ -1072,14 +1092,16 @@
     input.click();
   }
 
-  function startBatchPicker() {
-    try {
-      pickBatchFiles();
-    } catch {
-      panelNotice("文件选择器需从面板按钮触发", true);
+  window.addEventListener("keydown", (e) => {
+    if (e.ctrlKey && e.shiftKey && (e.key === "u" || e.key === "U")) {
+      e.preventDefault();
+      try {
+        pickBatchFiles();
+      } catch {
+        panelNotice("文件选择器需从面板按钮触发", true);
+      }
     }
-  }
-
+  });
   // 拦截 DeepSeek 附件按钮选中的文件：选多个 .md/.srt 时截住，不进 DeepSeek 附件区，直接批量处理。
   // 单文件走原流程（自动填空 + 手动发送），互不干扰。capture 阶段先于 React 监听。
   document.addEventListener(
@@ -1265,37 +1287,6 @@
         if (!window.closed) alert("浏览器不允许自动关闭页面，请手动关闭标签");
       }, 800);
     }
-  }
-
-  // 多轨道时下拉选择（不弹系统 prompt）
-  function chooseTrack(tracks) {
-    return new Promise((resolve) => {
-      const select = document.createElement("select");
-      select.style.cssText =
-        "margin-top:10px;width:100%;background:#111;color:#e4e4e7;border:1px solid #3f3f46;" +
-        "border-radius:8px;padding:6px;font-size:12px;";
-      tracks.forEach((t, i) => {
-        const opt = document.createElement("option");
-        opt.value = String(i);
-        opt.textContent =
-          (t.name?.simpleText || t.languageCode) +
-          " (" +
-          t.languageCode +
-          ")" +
-          (t.kind === "asr" ? " [自动]" : "");
-        select.appendChild(opt);
-      });
-      const overlay = createOverlay("选择字幕轨道", select, [
-        ovlBtn("取消", false, () => {
-          overlay.remove();
-          resolve(null);
-        }),
-        ovlBtn("下载", true, () => {
-          overlay.remove();
-          resolve(tracks[Number(select.value)]);
-        }),
-      ]);
-    });
   }
 
   async function onDownload(button, closeAfter) {
