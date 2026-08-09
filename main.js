@@ -366,6 +366,7 @@
       try {
         const name = origNameDesc.get.call(value);
         if (/\.srt$/i.test(name)) {
+          logMsg("SRT 伪装: " + name + " → " + name.replace(/\.srt$/i, ".txt"));
           return new File([value], name.replace(/\.srt$/i, ".txt"), {
             type: "text/plain",
             lastModified: value.lastModified,
@@ -582,9 +583,15 @@
           logMsg("XHR fetch_files: SUCCESS");
           batch.fileReady = true;
           notifyFileReady(true);
+        } else if (f?.status === "FAIL") {
+          logMsg("XHR fetch_files: 服务器拒绝 (FAIL)");
+          notifyFileReady(false);
         }
       }
       if (short.startsWith("/api/v0/file/upload_file")) {
+        if (xhr.status !== 200) {
+          logMsg("upload_file 非 200 (" + xhr.status + ")，服务器可能繁忙");
+        }
         try {
           const d = JSON.parse(xhr.responseText);
           const biz = d?.data?.biz_data || {};
@@ -601,9 +608,16 @@
           if (id) {
             batch.uploadId = id;
             logMsg("upload_file id: " + id.slice(0, 24) + "…");
+          } else {
+            logMsg("upload_file 响应无 id，可能失败");
           }
         } catch {
-          logMsg("upload_file 响应解析失败: " + xhr.status);
+          logMsg(
+            "upload_file 响应解析失败: " +
+              xhr.status +
+              " " +
+              String(xhr.responseText || "").slice(0, 120),
+          );
         }
       }
       if (url.includes("/api/v0/chat/completion")) {
@@ -615,7 +629,15 @@
               .find((l) => l.trim().startsWith("data:")) || "";
           logMsg("completion 响应: 200" + (first ? " | " + first.trim().slice(0, 100) : ""));
         } else {
-          logMsg("completion 响应: " + xhr.status + "（发送失败）");
+          // 发送失败：撤销 sent 标记，让 processFile 判「发送未确认」并记失败
+          batch.sent = false;
+          logMsg(
+            "completion 响应: " +
+              xhr.status +
+              "（发送失败）" +
+              " " +
+              String(xhr.responseText || "").slice(0, 120),
+          );
         }
       }
     } catch (e) {
@@ -645,6 +667,7 @@
   // 返回停止函数。
   function pollFileStatus(name, resolve) {
     let timer = null;
+    let netErrLogged = false; // 网络错误只打一次，避免刷屏
     const poll = async () => {
       if (batch.fileReady) return; // XHR fetch_files 已确认，轮询自停
       const id = batch.uploadId;
@@ -653,6 +676,14 @@
         const r = await fetch("/api/v0/file/fetch_files?file_ids=" + encodeURIComponent(id), {
           credentials: "include",
         });
+        if (!r.ok) {
+          if (!netErrLogged) {
+            netErrLogged = true;
+            logMsg("主动 fetch_files: HTTP " + r.status);
+          }
+        } else {
+          netErrLogged = false;
+        }
         const d = await r.json();
         const files = d?.data?.biz_data?.files || [];
         const f = files.find((x) => normName(x.file_name || x.name) === normName(name));
@@ -667,7 +698,12 @@
           resolve(false);
           return;
         }
-      } catch {}
+      } catch (e) {
+        if (!netErrLogged) {
+          netErrLogged = true;
+          logMsg("主动 fetch_files: 请求异常 " + e.message);
+        }
+      }
       timer = setTimeout(poll, 2000);
     };
     poll();
@@ -697,7 +733,10 @@
   // 只检查新增/变更节点文本，避免全页扫描。返回 observer 供调用方清理。
   function watchFileAppear(name) {
     const input = findInput();
-    if (!input) return null;
+    if (!input) {
+      logMsg("watchFileAppear: 未找到输入框，跳过 DOM 监听");
+      return null;
+    }
     const needle = shortName(name); // 放宽匹配：chip 显示可能截断文件名
     const inPanel = (el) => el && el.nodeType === 1 && !!el.closest?.("#ds-panel");
     const check = () => {
@@ -802,7 +841,9 @@
         cancelable: true,
       }),
     );
-    return waitFor(() => batch.sent || /\/a\/chat\/s\//.test(location.href), 4000);
+    const ok = await waitFor(() => batch.sent || /\/a\/chat\/s\//.test(location.href), 4000);
+    if (!ok) logMsg("Enter 后 4s 未确认发送（无 completion 且 URL 未跳转）");
+    return ok;
   }
 
   // 确保输入框干净：会话页先回首页；首页有残留草稿则开新对话清除。
@@ -847,6 +888,7 @@
     batch.fileReady = false;
     batch.fileReadyDom = false;
     batch.uploadId = "";
+    logMsg("等待上传就绪: " + file.name);
     const mo = watchFileAppear(file.name);
     const ready = await waitFileReady(file.name, 30000);
     if (mo) mo.disconnect();
@@ -862,6 +904,9 @@
     if (input && !input.value.trim()) {
       nativeSetter.call(input, promptText);
       input.dispatchEvent(new Event("input", { bubbles: true }));
+      logMsg("批量填空: " + promptText);
+    } else {
+      logMsg("输入框已有内容或未找到，跳过填空");
     }
 
     await sendAndConfirm();
@@ -992,6 +1037,7 @@
     });
     renderTaskList();
     setBatchBtnState();
+    logMsg("已停止，剩余任务未处理");
     panelNotice("已停止，剩余任务未处理", true);
   }
 
@@ -1072,12 +1118,27 @@
     setBatchBtnState();
     logMsg("开始，共 " + batch.queue.length + " 个文件（并发 2）");
     while (batch.queue.length && !batch.stop) {
+      // 并发闸：等侧边栏进行中会话 < 2。等待时提示当前占用。
+      const cur = countNewChatSessions();
+      if (cur >= MAX_CONCURRENT) {
+        logMsg(
+          "排队等待: 当前 " +
+            cur +
+            "/" +
+            MAX_CONCURRENT +
+            " 会话进行中（剩余 " +
+            batch.queue.length +
+            " 个文件）",
+        );
+      }
       await waitFor(() => countNewChatSessions() < MAX_CONCURRENT || batch.stop, 3600 * 1000);
       if (batch.stop) break;
       const file = batch.queue.shift();
+      logMsg("出队: " + file.name + "（剩余 " + batch.queue.length + " 个）");
       try {
         await processFile(file);
         batch.done++;
+        logMsg("完成 " + batch.done + "/" + batch.total);
       } catch (e) {
         if (batch.stop) break;
         batch.failed++;
@@ -1151,12 +1212,6 @@
     },
     true,
   );
-  window.addEventListener("keydown", (e) => {
-    if (e.ctrlKey && e.shiftKey && (e.key === "u" || e.key === "U")) {
-      e.preventDefault();
-      startBatchPicker();
-    }
-  });
 
   // === YouTube 字幕下载（仅 www.youtube.com 生效）===
 
@@ -1320,10 +1375,18 @@
     try {
       const playerResponse = getPlayerResponse();
       if (!playerResponse) {
+        logMsg("YT 下载: 未获取到播放器数据");
         alert("未获取到播放器数据，请刷新页面后重试");
         return;
       }
       const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+      logMsg(
+        "YT 下载: " +
+          tracks.length +
+          " 条字幕轨道（视频: " +
+          (playerResponse.videoDetails?.title || "?").slice(0, 40) +
+          "）",
+      );
       if (tracks.length === 0) {
         alert("该视频没有可用字幕");
         return;
@@ -1333,6 +1396,7 @@
       if (tracks.length > 1) {
         track = await chooseTrack(tracks);
         if (!track) return;
+        logMsg("YT 下载: 选择轨道 " + (track.name?.simpleText || track.languageCode));
       }
 
       const url = new URL(track.baseUrl);
@@ -1340,26 +1404,32 @@
 
       let response = await fetch(url);
       let text = await response.text();
+      logMsg("YT 字幕接口: HTTP " + response.status + " 长度 " + text.length);
 
       // 200 但空内容 = 需要 pot token。开字幕触发 YT 自己的 timedtext 请求，
       // 直接复用 YT 正在用的完整 URL（含 pot 和全部参数），比拼接 pot 可靠
       if (response.ok && !text.trim()) {
+        logMsg("YT 字幕接口返回空，尝试开启字幕获取 pot token 版 URL");
         await ensureSubtitlesOn();
         const timedtextUrl = await waitForTimedtextUrl(playerResponse?.videoDetails?.videoId);
         if (timedtextUrl) {
+          logMsg("YT timedtext 缓存命中（含 pot token）");
           const cachedResponse = await fetch(timedtextUrl);
           if (cachedResponse.ok) {
             const cachedText = await cachedResponse.text();
             try {
               const cachedEvents = JSON.parse(cachedText).events || [];
               if (cachedEvents.length > 0) {
+                logMsg("YT 缓存字幕解析: " + cachedEvents.length + " 条事件");
                 finishDownload(playerResponse, cachedEvents, closeAfter);
                 return;
               }
             } catch {
-              // 缓存 URL 非 JSON，落回下方常规路径（会报空内容）
+              logMsg("YT 缓存 URL 非 JSON，落回常规路径");
             }
           }
+        } else {
+          logMsg("YT timedtext 6s 内未捕获，回退常规路径");
         }
       }
 
@@ -1378,13 +1448,16 @@
         throw new Error("接口返回异常: " + text.slice(0, 120));
       }
       const events = json.events || [];
+      logMsg("YT 字幕解析: " + events.length + " 条事件");
       if (events.length === 0) {
         alert("未获取到字幕内容");
         return;
       }
 
       finishDownload(playerResponse, events, closeAfter);
+      logMsg("YT 下载完成: " + (playerResponse.videoDetails?.title || "").slice(0, 40) + ".srt");
     } catch (error) {
+      logMsg("YT 下载失败: " + error.message);
       alert("下载失败: " + error.message);
     } finally {
       button.disabled = false;
