@@ -30,7 +30,7 @@
   let promptText = GM_getValue(STORAGE.PROMPT, DEFAULT_PROMPT);
   let newChatAfterSend = GM_getValue(STORAGE.NEWCHAT, false);
 
-  // === 页面控制面板（替代油猴菜单，仅 DeepSeek 页面）===
+  // === 页面控制面板（仅 DeepSeek 页面）===
   function buildPanel() {
     if (location.hostname !== "chat.deepseek.com" || document.getElementById("ds-panel")) return;
     const panel = document.createElement("div");
@@ -333,7 +333,7 @@
     }
   }, 1500);
 
-  // === 核心：拦截 File 名称，把 .srt 伪装成 .txt ===
+  // === 核心：把 .srt 伪装成 .txt（拦截 File.name/type + FormData 替换）===
   const origNameDesc = Object.getOwnPropertyDescriptor(File.prototype, "name");
   const origTypeDesc = Object.getOwnPropertyDescriptor(File.prototype, "type");
 
@@ -364,9 +364,8 @@
     });
   }
 
-  // === 关键：FormData 序列化不走 JS getter（Blink 读内部槽位）===
-  // File.prototype.name 拦截骗过前端校验，但服务器收到的是真 .srt 名，会报格式不支持。
-  // 必须在入 FormData 时替换成新的 File 对象。
+  // 关键：FormData 序列化不走 JS getter（Blink 读内部槽位），
+  // 所以必须在入 FormData 时把 .srt 换成新的 .txt File 对象，服务器才收到 .txt 名。
   function wrapSrt(value) {
     if (value instanceof File) {
       try {
@@ -391,7 +390,7 @@
     return origSet.call(this, name, wrapSrt(value), filename);
   };
 
-  // === 自动填入输入框 ===
+  // === 自动填空与发送后新对话 ===
   // React 受控组件必须用原生 setter 赋值并派发 input 事件，才能触发其 onChange
   const nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
 
@@ -443,10 +442,8 @@
   let pendingFill = false;
   let watchingSend = false;
 
-  // 发送后开启新对话：监听 URL。DeepSeek 发送消息后进入会话页 /a/chat/s/...，
-  // 新对话后回到 /。从非会话页跳到会话页 = 消息已发送。
-  // ponytail: 假设用户流程是“开新对话→拖字幕→发送”，URL 每次从 / 跳到会话页；
-  // 若在已有会话里发消息（URL 不变）检测不到，需要时再兜输入框轮询。
+  // 发送后开新对话：监听 URL。DeepSeek 发消息后进会话页 /a/chat/s/...，开新对话回 /。
+  // 注意：若在已有会话里发消息（URL 不变）则检测不到。
   function watchSendThenNewChat() {
     if (!newChatAfterSend || watchingSend) return;
     watchingSend = true;
@@ -499,9 +496,9 @@
     setTimeout(retry, 500);
   }
 
-  // === 批量处理 MD 文件 ===
-  // 上传无并发限制（约 1s），发送有 2 并发限制。脚本控制发送节奏：
-  // 发送前查闸（生成中 < 2），完成信号 = chat/completion 的 XHR load（SSE 流结束）。
+  // === 批量处理（并发 2，侧边栏实时计数）===
+  // 发送前查闸：侧边栏「新对话」会话数 < 2 才放行下一个文件。
+  // 完成信号：生成完成后 DeepSeek 自动把会话标题改为内容摘要，计数减少。
   const MAX_CONCURRENT = 2;
   const batch = {
     running: false,
@@ -531,7 +528,7 @@
     });
   }
 
-  // 全部运行日志进面板（ds-log），随时可复制；同时输出到 console 备份。
+  // 面板日志：进面板（ds-log）实时显示、可复制，同时输出到 console 备份
   function logMsg(line) {
     const d = new Date();
     const ts =
@@ -550,6 +547,8 @@
     console.log("[批量]", line);
   }
 
+  // DeepSeek XHR 信号：fetch_files 确认上传成功，upload_file 记录日志。
+  // 生成完成信号已改为侧边栏计数（startSidebarCounter），此处不再处理 completion。
   function handleDeepSeekSignals(url, xhr) {
     if (!batch.running) return;
     try {
@@ -578,7 +577,7 @@
     }
   }
 
-  // 后备信号：附件 chip 出现在输入框附近（fetch_files 解析失败时兜底）。
+  // 上传完成信号：fetch_files 返回 SUCCESS，或附件 chip 出现在输入框附近（兜底）。
   // MutationObserver 事件驱动，不轮询。返回 observer 供调用方清理。
   function watchFileAppear(name) {
     const input = findInput();
@@ -607,6 +606,7 @@
     return mo;
   }
 
+  // 注入文件到 DeepSeek 隐藏 input 并触发 change（与拖入效果一致）
   function injectFile(file) {
     const input = document.querySelector('input[type="file"]');
     if (!input) return false;
@@ -627,6 +627,8 @@
   }
 
   function sendAndConfirm() {
+    // 先点发送按钮，2.5s 未确认则补一次 Enter 键；
+    // 确认依据 = completion 请求已发出（xhrProto.send 里置 batch.sent）或 URL 跳会话页
     batch.sent = false;
     const btn = findSendButton();
     if (btn) btn.click();
@@ -650,7 +652,7 @@
     });
   }
 
-  // 确保输入框干净：会话页先回首页；首页有残留内容（上次失败）则开新对话清草稿
+  // 确保输入框干净：会话页先回首页；首页有残留草稿（上次失败）则开新对话清除
   async function ensureHomeInput() {
     if (/\/a\/chat\/s\//.test(location.href)) {
       const btn = findNewChatButton();
@@ -714,7 +716,7 @@
     logMsg("已发送: " + file.name);
   }
 
-  // === 批量任务浮层 ===
+  // === 通用浮层（批量结果弹窗已移除，仍用于 YouTube 轨道选择）===
   function createOverlay(titleText, contentEl, footerBtns) {
     const overlay = document.createElement("div");
     overlay.style.cssText =
@@ -795,6 +797,7 @@
   }
 
   function stopBatch() {
+    // 停止批量：剩余任务标记已停止，本次批次作废（需重新选文件）
     batch.stop = true;
     batch.running = false;
     batch.pendingFiles = null; // 已停止的批次作废，重新选文件
@@ -858,6 +861,7 @@
     sidebarObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
   }
 
+  // 批量主流程：排队 + 并发闸 + 失败记录。完成标记由 sidebarObserver 驱动。
   async function runBatch(files) {
     if (batch.running) return;
     batch.running = true;
@@ -995,7 +999,7 @@
   })();
 
   // 播放器私有 API（getPlayerResponse）在沙箱不可用，改用 unsafeWindow 读页面全局。
-  // ponytail: SPA 切换视频后 ytInitialPlayerResponse 可能过期，用 videoId 校验。
+  // 注意：SPA 切换视频后 ytInitialPlayerResponse 可能过期，用 videoId 校验。
   function getYoutubeVideoId() {
     return new URLSearchParams(location.search).get("v");
   }
