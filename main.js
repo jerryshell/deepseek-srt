@@ -18,7 +18,7 @@
 
   // === 配置 ===
   const DEFAULT_PROMPT = "通俗易懂总结";
-  const DEFAULT_DELAY = 15; // 批量发送间隔（秒），防风控封禁
+  const DEFAULT_DELAY = 3; // 批量发送间隔基准（秒），实际 基准~基准+2s 随机，防风控
   const STORAGE = {
     ENABLED: "srtAutoFill",
     MD: "mdAutoFill",
@@ -147,10 +147,10 @@
         GM_setValue(STORAGE.PROMPT, promptText);
       },
     );
-    // 发送间隔行（秒，批量防风控）
+    // 发送间隔行（基准秒，实际基准~基准+2s 随机；批量防风控）
     const delayRow = inlineEditRow(
       "发送间隔: ",
-      () => sendDelaySec + "s",
+      () => sendDelaySec + "~" + (sendDelaySec + 2) + "s 随机",
       (v) => {
         const n = parseInt(v, 10);
         if (Number.isFinite(n) && n >= 0) {
@@ -1249,10 +1249,11 @@
         await processFile(file);
         batch.done++;
         logMsg("完成 " + batch.done + "/" + batch.total);
-        // 发送间隔节流：每处理完一个文件等 N 秒再继续，防风控封禁（批量过快会被风控）
+        // 发送间隔节流：每处理完一个文件随机等 基准~基准+2s 再继续，防风控封禁
         if (!batch.stop && batch.queue.length && sendDelaySec > 0) {
-          logMsg("发送间隔等待 " + sendDelaySec + "s…");
-          await new Promise((r) => setTimeout(r, sendDelaySec * 1000));
+          const waitMs = sendDelaySec * 1000 + Math.random() * 2000;
+          logMsg("发送间隔等待 " + Math.round(waitMs / 1000) + "s…");
+          await new Promise((r) => setTimeout(r, waitMs));
         }
       } catch (e) {
         if (batch.stop) break;
