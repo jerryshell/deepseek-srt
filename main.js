@@ -612,51 +612,59 @@
       .replace(/\.(md|srt|txt)$/i, "")
       .slice(0, 25);
 
-  // 上传就绪：纯事件驱动等待（XHR load / MutationObserver 触发时直接 resolve）。
-  // fetch_files 兜底只在 2s 无信号时启动低频轮询（DeepSeek 前端可能不发）。
+  // 上传就绪：等待 fetch_files SUCCESS（XHR 拦截或主动轮询）。
+  // DOM chip 只说明 DeepSeek 已接收文件，不代表文件就绪（服务器繁忙时会延后）——
+  // 所以 chip 出现后仍继续等 SUCCESS，发送才不会被 couldSubmit 吞掉。
   let fileReadyWaiters = [];
   function notifyFileReady(ok) {
     const ws = fileReadyWaiters;
     fileReadyWaiters = [];
     ws.forEach((w) => w(ok));
   }
+  // 主动 fetch_files 轮询：DeepSeek 前端可能不发 fetch，且 SUCCESS 前发送会被吞，故必须等到明确状态。
+  // 返回停止函数。
+  function pollFileStatus(name, resolve) {
+    let timer = null;
+    const poll = async () => {
+      if (batch.fileReady) return; // XHR fetch_files 已确认，轮询自停
+      const id = batch.uploadId;
+      if (!id) return (timer = setTimeout(poll, 2000));
+      try {
+        const r = await fetch("/api/v0/file/fetch_files?file_ids=" + encodeURIComponent(id), {
+          credentials: "include",
+        });
+        const d = await r.json();
+        const files = d?.data?.biz_data?.files || [];
+        const f = files.find((x) => normName(x.file_name || x.name) === normName(name));
+        if (f?.status === "SUCCESS") {
+          logMsg("主动 fetch_files: SUCCESS");
+          batch.fileReady = true;
+          resolve(true);
+          return;
+        }
+        if (f?.status === "FAIL") {
+          logMsg("主动 fetch_files: 服务器拒绝 (FAIL)");
+          resolve(false);
+          return;
+        }
+      } catch {}
+      timer = setTimeout(poll, 2000);
+    };
+    poll();
+    return () => clearTimeout(timer);
+  }
   async function waitFileReady(name, timeoutMs) {
-    if (batch.fileReady || batch.fileReadyDom || batch.stop) return true;
+    if (batch.fileReady || batch.stop) return true;
     return new Promise((resolve) => {
       fileReadyWaiters.push(resolve);
-      let fetchTimer = null;
-      const stopFetch = () => {
-        if (fetchTimer) clearTimeout(fetchTimer);
-      };
-      const poll = async () => {
-        if (batch.fileReady || batch.fileReadyDom) return;
-        const id = batch.uploadId;
-        if (id) {
-          try {
-            const r = await fetch("/api/v0/file/fetch_files?file_ids=" + encodeURIComponent(id), {
-              credentials: "include",
-            });
-            const d = await r.json();
-            const files = d?.data?.biz_data?.files || [];
-            const f = files.find((f) => normName(f.file_name || f.name) === normName(name));
-            if (f?.status === "SUCCESS") {
-              logMsg("主动 fetch_files: SUCCESS");
-              batch.fileReady = true;
-              notifyFileReady(true);
-              return;
-            }
-            if (f?.status === "FAIL") {
-              logMsg("主动 fetch_files: 服务器拒绝 (FAIL)");
-              notifyFileReady(false);
-              return;
-            }
-          } catch {}
-        }
-        fetchTimer = setTimeout(poll, 2000);
-      };
-      fetchTimer = setTimeout(poll, 2000);
+      // 先给 DeepSeek 前端 2s 发 fetch_files 的机会，未发则由主动轮询接管
+      let stop = null;
       setTimeout(() => {
-        stopFetch();
+        if (batch.fileReady) return;
+        stop = pollFileStatus(name, resolve);
+      }, 2000);
+      setTimeout(() => {
+        if (stop) stop();
         fileReadyWaiters = fileReadyWaiters.filter((w) => w !== resolve);
         logMsg("上传就绪等待超时，uploadId: " + (batch.uploadId || "空"));
         resolve(false);
@@ -684,8 +692,7 @@
     };
     if (check()) {
       logMsg("附件区已见文件名（初始检查）");
-      batch.fileReadyDom = true;
-      notifyFileReady(true);
+      batch.fileReadyDom = true; // 仅标记：发送仍等 fetch_files SUCCESS（服务器繁忙时 chip 早于就绪）
       return null;
     }
     const mo = new MutationObserver((mutations) => {
@@ -695,7 +702,6 @@
           if (m.target.textContent?.includes(needle)) {
             logMsg("附件区已见文件名（DOM 变更）");
             batch.fileReadyDom = true;
-            notifyFileReady(true);
             mo.disconnect();
             return;
           }
@@ -707,7 +713,6 @@
           if (t?.includes(needle)) {
             logMsg("附件区已见文件名（DOM 变更）");
             batch.fileReadyDom = true;
-            notifyFileReady(true);
             mo.disconnect();
             return;
           }
@@ -828,7 +833,7 @@
     if (batch.stop) throw new Error("已停止");
     if (!ready) {
       logMsg("上传超时: " + file.name);
-      throw new Error("上传超时（附件区未出现文件）");
+      throw new Error("上传未就绪（服务器繁忙或处理失败）");
     }
 
     // 填空（输入框已有内容则不覆盖）
