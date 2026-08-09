@@ -308,7 +308,7 @@
     return "就绪";
   }
 
-  // 面板状态刷新：并入 logMsg（batch 每次变化必经点），不再用定时器轮询
+  // 面板状态刷新：并入 logMsg（batch 每次变化的必经点）
 
   // === 核心：把 .srt 伪装成 .txt（拦截 File.name/type + FormData 替换）===
   const origNameDesc = Object.getOwnPropertyDescriptor(File.prototype, "name");
@@ -524,8 +524,7 @@
     });
   }
 
-  // 面板日志：进面板（ds-log）实时显示、可复制，同时输出到 console 备份。
-  // 同时刷新状态栏与进度条（batch 每次变化的必经点，替代定时轮询）。
+  // 面板日志：进面板（ds-log）实时显示可复制；同时刷新状态栏与进度条（batch 变化必经点）
   function logMsg(line) {
     const d = new Date();
     const ts =
@@ -561,8 +560,7 @@
     }
   }
 
-  // DeepSeek XHR 信号：fetch_files 确认上传成功，upload_file 记录日志。
-  // 生成完成信号已改为侧边栏计数（startSidebarCounter），此处不再处理 completion。
+  // DeepSeek XHR 信号：fetch_files 确认上传成功，upload_file 记录日志
   function handleDeepSeekSignals(url, xhr) {
     if (!batch.running) return;
     try {
@@ -688,17 +686,15 @@
       .replace(/\.(md|srt|txt)$/i, "")
       .slice(0, 25);
 
-  // 上传就绪：等待 fetch_files SUCCESS（XHR 拦截或主动轮询）。
-  // DOM chip 只说明 DeepSeek 已接收文件，不代表文件就绪（服务器繁忙时会延后）——
-  // 所以 chip 出现后仍继续等 SUCCESS，发送才不会被 couldSubmit 吞掉。
-  let fileReadyWaiters = []; // {name, resolve}，按文件名匹配，并发 2 时互不误触
+  // 上传就绪：等 fetch_files SUCCESS（XHR 拦截或主动轮询）。
+  // DOM chip 只说明 DeepSeek 已接收文件，不代表就绪（服务器繁忙时延后），发送才不会被吞。
+  let fileReadyWaiters = []; // {name, resolve}，按文件名匹配，并发 2 互不误触
   function notifyFileReady(ok, name) {
     const target = name ? fileReadyWaiters.filter((w) => w.name === name) : fileReadyWaiters;
     fileReadyWaiters = name ? fileReadyWaiters.filter((w) => w.name !== name) : [];
     target.forEach((w) => w.resolve(ok));
   }
-  // 主动 fetch_files 轮询：DeepSeek 前端可能不发 fetch，且 SUCCESS 前发送会被吞，故必须等到明确状态。
-  // 返回停止函数。
+  // 主动 fetch_files 轮询：前端可能不发 fetch，必须等到明确状态才发送。返回停止函数。
   function pollFileStatus(name, resolve) {
     let timer = null;
     let netErrLogged = false; // 网络错误只打一次，避免刷屏
@@ -759,8 +755,8 @@
       let stop = null;
       let done = false;
       let timeoutId = null;
-      let errMo = null; // 观察「请删除异常文件」提示（事件驱动，替代每秒轮询）
-      // 统一出口：resolve 后立刻清理超时与轮询，避免残留回调打噪音日志/误 resolve
+      let errMo = null;
+      // 统一出口：resolve 后清理超时与轮询，避免残留回调
       const waiter = (ok) => {
         if (done) return;
         done = true;
@@ -771,9 +767,7 @@
         resolve(ok);
       };
       fileReadyWaiters.push({ name, resolve: waiter });
-      // DeepSeek 对上传失败的文件显示「请删除异常文件再发送」，检测到立即判失败，不空等
-      // DeepSeek 对上传失败的文件显示「请删除异常文件再发送」——
-      // 用 MutationObserver 事件驱动（提示出现才回调），替代每秒全页 innerText 轮询
+      // DeepSeek 对上传失败的文件显示「请删除异常文件再发送」，用 MutationObserver 检测，命中即判失败
       errMo = new MutationObserver(() => {
         if (done) return;
         if (document.body.innerText.includes("请删除异常文件")) {
@@ -806,9 +800,8 @@
     });
   }
 
-  // 上传完成信号：fetch_files 返回 SUCCESS，或附件 chip 出现在输入框附近（兜底）。
-  // MutationObserver 事件驱动，不轮询。观察 body 保证节点存活（React 可能重建输入框容器）；
-  // 只检查新增/变更节点文本，避免全页扫描。返回 observer 供调用方清理。
+  // 上传完成信号：fetch_files SUCCESS 或附件 chip 出现（兜底）。
+  // MutationObserver 观察 body（React 可能重建输入框容器），只检查新增/变更节点文本。返回 observer 供调用方清理。
   function watchFileAppear(name) {
     const input = findInput();
     if (!input) {
@@ -891,10 +884,10 @@
     return found;
   }
 
-  // 发送并确认：循环重试（服务器繁忙时 couldSubmit 可能延迟就绪，单次点击/Enter 会被吞）。
-  // 每轮：点按钮（2s 确认）→ 无确认则补 Enter（2.5s 确认）→ 再循环直到 sent 或 30s 超时。
-  // 确认依据 = completion 请求已发出（xhrProto.send 里置 batch.sent）或 URL 跳会话页。
-  // 不会双发：click/Enter 生效时 completion 同步发出（sent 立即置 true），未生效时无副作用。
+  // 发送并确认：循环重试（服务器繁忙时 couldSubmit 延迟就绪，单次点击/Enter 会被吞）。
+  // 每轮：点按钮（2s）→ 未确认则补 Enter（2.5s）→ 循环直到 sent 或 30s 超时。
+  // 确认 = completion 请求已发出（send 拦截置 batch.sent）或 URL 跳会话页；
+  // 不会双发：生效时 sent 立即置 true，未生效时无副作用。
   async function sendAndConfirm() {
     batch.sent = false;
     const deadline = Date.now() + 30000;
@@ -1310,9 +1303,7 @@
 
   // === YouTube 字幕下载（仅 www.youtube.com 生效）===
 
-  // pot token 捕获：沙箱包装 unsafeWindow.XMLHttpRequest.prototype 可影响页面请求。
-  // YT 播放字幕时自己会请求 api/timedtext（带 pot），从响应 URL 里提取缓存。
-  // （uBO 拦动态 script 注入，但拦不住原型包装；YT 用 XHR 发 timedtext，见 read-frog 同款做法）
+  // pot token 捕获：YT 播放字幕时自己请求 api/timedtext（带 pot），从 XHR 响应 URL 提取缓存
   const timedtextUrlCache = new Map(); // videoId -> 完整 timedtext URL（含 pot，YT 自己请求的）
   const timedtextWaiters = new Map(); // videoId -> [resolve]，cacheTimedtextUrl 时直接 resolve（事件驱动）
   (function hookYoutubeNetwork() {
@@ -1335,7 +1326,7 @@
       }
     }
 
-    // XHR（YT 用 XHR 发 timedtext，实证有效）
+    // XHR
     const xhrProto = unsafeWindow.XMLHttpRequest?.prototype;
     if (xhrProto) {
       const origOpen = xhrProto.open;
@@ -1621,6 +1612,6 @@
       " | FormData 钩子: " +
       true,
   );
-  // 面板首次构建（状态刷新已并入 logMsg，无需定时器）
+  // 面板首次构建（状态刷新已并入 logMsg）
   if (location.hostname === "chat.deepseek.com") buildPanel();
 })();
