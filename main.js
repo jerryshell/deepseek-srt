@@ -18,7 +18,7 @@
 
   // === 配置 ===
   const DEFAULT_PROMPT = "通俗易懂总结";
-  const DEFAULT_DELAY = 60; // 批量发送间隔（秒），防风控封禁
+  const DEFAULT_DELAY = 15; // 批量发送间隔（秒），防风控封禁
   const STORAGE = {
     ENABLED: "srtAutoFill",
     MD: "mdAutoFill",
