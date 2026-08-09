@@ -1503,4 +1503,20 @@
     container.appendChild(createDownloadButton("下载并关闭", true));
   }
   setInterval(ensureYoutubeButton, 2000);
+
+  // 启动日志：确认脚本加载、配置与关键钩子状态（出问题先看这一行）
+  logMsg(
+    "SRT 助手已加载 | 自动填空 srt/md: " +
+      autoFillEnabled +
+      "/" +
+      mdAutoFillEnabled +
+      " | 提示词: " +
+      promptText +
+      " | 发送后新对话: " +
+      newChatAfterSend +
+      " | XHR 钩子: " +
+      !!unsafeWindow.XMLHttpRequest +
+      " | FormData 钩子: " +
+      true,
+  );
 })();
