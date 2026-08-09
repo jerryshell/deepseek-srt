@@ -18,16 +18,19 @@
 
   // === 配置 ===
   const DEFAULT_PROMPT = "通俗易懂总结";
+  const DEFAULT_DELAY = 60; // 批量发送间隔（秒），防风控封禁
   const STORAGE = {
     ENABLED: "srtAutoFill",
     MD: "mdAutoFill",
     PROMPT: "srtPrompt",
     NEWCHAT: "newChatAfterSend",
+    DELAY: "sendDelay",
   };
   let autoFillEnabled = GM_getValue(STORAGE.ENABLED, true);
   let mdAutoFillEnabled = GM_getValue(STORAGE.MD, false);
   let promptText = GM_getValue(STORAGE.PROMPT, DEFAULT_PROMPT);
   let newChatAfterSend = GM_getValue(STORAGE.NEWCHAT, false);
+  let sendDelaySec = GM_getValue(STORAGE.DELAY, DEFAULT_DELAY);
 
   // === 页面控制面板（仅 DeepSeek 页面）===
   function buildPanel() {
@@ -92,49 +95,70 @@
       return row;
     }
 
-    const promptRow = document.createElement("div");
-    promptRow.style.cssText = rowStyle;
-    const promptLabel = document.createElement("span");
-    promptLabel.style.cssText =
-      labelStyle + "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
-    const paintPrompt = () => {
-      promptLabel.textContent = "提示词: " + promptText; // CSS ellipsis 截断
-    };
-    paintPrompt();
-    promptRow.appendChild(promptLabel);
-    const editIc = document.createElement("span");
-    editIc.textContent = "✎";
-    editIc.style.cssText = "color:#71717a;margin-left:6px;flex-shrink:0;";
-    promptRow.appendChild(editIc);
-    // 点击 → 行内编辑（替换为输入框，回车/失焦保存）
-    promptRow.addEventListener("click", () => {
-      const input = document.createElement("input");
-      input.type = "text";
-      input.value = promptText;
-      input.style.cssText =
-        "flex:1;min-width:0;background:#111;color:#fff;border:1px solid #4d6bfe;" +
-        "border-radius:6px;padding:3px 6px;font-size:11px;outline:none;";
-      promptLabel.replaceWith(input);
-      input.focus();
-      input.select();
-      const save = () => {
-        const v = input.value.trim();
-        if (v) {
-          promptText = v;
-          GM_setValue(STORAGE.PROMPT, promptText);
-        }
-        input.replaceWith(promptLabel);
-        paintPrompt();
-      };
-      input.addEventListener("blur", save);
-      input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          save();
-        }
-        if (e.key === "Escape") input.replaceWith(promptLabel);
+    // 行内编辑行：label + ✎，点击换成输入框（回车/失焦保存），用于提示词、发送间隔等配置
+    function inlineEditRow(prefix, getText, onSave) {
+      const row = document.createElement("div");
+      row.style.cssText = rowStyle;
+      const label = document.createElement("span");
+      label.style.cssText =
+        labelStyle +
+        "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+      const paint = () => (label.textContent = prefix + getText());
+      paint();
+      const ic = document.createElement("span");
+      ic.textContent = "✎";
+      ic.style.cssText = "color:#71717a;margin-left:6px;flex-shrink:0;";
+      row.appendChild(label);
+      row.appendChild(ic);
+      row.addEventListener("click", () => {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.value = getText();
+        input.style.cssText =
+          "flex:1;min-width:0;background:#111;color:#fff;border:1px solid #4d6bfe;" +
+          "border-radius:6px;padding:3px 6px;font-size:11px;outline:none;";
+        label.replaceWith(input);
+        input.focus();
+        input.select();
+        const save = () => {
+          const v = input.value.trim();
+          if (v) onSave(v);
+          input.replaceWith(label);
+          paint();
+        };
+        input.addEventListener("blur", save);
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            save();
+          }
+          if (e.key === "Escape") input.replaceWith(label);
+        });
       });
-    });
+      return row;
+    }
+
+    // 提示词行
+    const promptRow = inlineEditRow(
+      "提示词: ",
+      () => promptText,
+      (v) => {
+        promptText = v;
+        GM_setValue(STORAGE.PROMPT, promptText);
+      },
+    );
+    // 发送间隔行（秒，批量防风控）
+    const delayRow = inlineEditRow(
+      "发送间隔: ",
+      () => sendDelaySec + "s",
+      (v) => {
+        const n = parseInt(v, 10);
+        if (Number.isFinite(n) && n >= 0) {
+          sendDelaySec = n;
+          GM_setValue(STORAGE.DELAY, n);
+        }
+      },
+    );
 
     const batchBtn = document.createElement("button");
     batchBtn.id = "ds-batch-btn";
@@ -1225,6 +1249,11 @@
         await processFile(file);
         batch.done++;
         logMsg("完成 " + batch.done + "/" + batch.total);
+        // 发送间隔节流：每处理完一个文件等 N 秒再继续，防风控封禁（批量过快会被风控）
+        if (!batch.stop && batch.queue.length && sendDelaySec > 0) {
+          logMsg("发送间隔等待 " + sendDelaySec + "s…");
+          await new Promise((r) => setTimeout(r, sendDelaySec * 1000));
+        }
       } catch (e) {
         if (batch.stop) break;
         batch.failed++;
