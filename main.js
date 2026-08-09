@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek SRT 上传助手 + YouTube 字幕下载
 // @namespace    http://tampermonkey.net/
-// @version      3.3
+// @version      3.4
 // @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt/.md 时自动填入提示词。批量处理 MD 文件（并发 2 自动排队）。YouTube 页面添加“下载字幕”按钮。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
@@ -572,7 +572,10 @@
             .replace(/\s+/g, " ")
             .trim();
         const f = files.find((f) => norm(f.file_name || f.name) === norm(batch.currentFileName));
-        if (f?.status === "SUCCESS") batch.fileReady = true;
+        if (f?.status === "SUCCESS") {
+          batch.fileReady = true;
+          notifyFileReady(true);
+        }
       }
       if (short.startsWith("/api/v0/file/upload_file")) {
         logMsg("upload_file -> " + xhr.status);
@@ -602,34 +605,55 @@
       .replace(/\.(md|srt|txt)$/i, "")
       .slice(0, 25);
 
-  // 上传完成信号：DOM 附件 chip（放宽匹配，防截断）或 fetch_files SUCCESS。
-  // 主动轮询 fetch_files（DeepSeek 前端可能不发，脚本自己查，不依赖前端）。
-  async function waitForFileReady(name, timeoutMs) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      if (batch.fileReady || batch.fileReadyDom || batch.stop) return true;
-      const id = batch.uploadId;
-      if (id) {
-        try {
-          const r = await fetch("/api/v0/file/fetch_files?file_ids=" + encodeURIComponent(id), {
-            credentials: "include",
-          });
-          const d = await r.json();
-          const files = d?.data?.biz_data?.files || [];
-          const f = files.find((f) => normName(f.file_name || f.name) === normName(name));
-          if (f?.status === "SUCCESS") {
-            logMsg("主动 fetch_files: SUCCESS");
-            return true;
-          }
-          if (f?.status === "FAIL") {
-            logMsg("主动 fetch_files: 服务器拒绝 (FAIL)");
-            return false;
-          }
-        } catch {}
-      }
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-    return false;
+  // 上传就绪：纯事件驱动等待（XHR load / MutationObserver 触发时直接 resolve）。
+  // fetch_files 兜底只在 2s 无信号时启动低频轮询（DeepSeek 前端可能不发）。
+  let fileReadyWaiters = [];
+  function notifyFileReady(ok) {
+    const ws = fileReadyWaiters;
+    fileReadyWaiters = [];
+    ws.forEach((w) => w(ok));
+  }
+  async function waitFileReady(name, timeoutMs) {
+    if (batch.fileReady || batch.fileReadyDom || batch.stop) return true;
+    return new Promise((resolve) => {
+      fileReadyWaiters.push(resolve);
+      let fetchTimer = null;
+      const stopFetch = () => {
+        if (fetchTimer) clearTimeout(fetchTimer);
+      };
+      const poll = async () => {
+        if (batch.fileReady || batch.fileReadyDom) return;
+        const id = batch.uploadId;
+        if (id) {
+          try {
+            const r = await fetch("/api/v0/file/fetch_files?file_ids=" + encodeURIComponent(id), {
+              credentials: "include",
+            });
+            const d = await r.json();
+            const files = d?.data?.biz_data?.files || [];
+            const f = files.find((f) => normName(f.file_name || f.name) === normName(name));
+            if (f?.status === "SUCCESS") {
+              logMsg("主动 fetch_files: SUCCESS");
+              batch.fileReady = true;
+              notifyFileReady(true);
+              return;
+            }
+            if (f?.status === "FAIL") {
+              logMsg("主动 fetch_files: 服务器拒绝 (FAIL)");
+              notifyFileReady(false);
+              return;
+            }
+          } catch {}
+        }
+        fetchTimer = setTimeout(poll, 2000);
+      };
+      fetchTimer = setTimeout(poll, 2000);
+      const timer = setTimeout(() => {
+        stopFetch();
+        fileReadyWaiters = fileReadyWaiters.filter((w) => w !== resolve);
+        resolve(false);
+      }, timeoutMs);
+    });
   }
 
   // 上传完成信号：fetch_files 返回 SUCCESS，或附件 chip 出现在输入框附近（兜底）。
@@ -649,6 +673,7 @@
     };
     if (check()) {
       batch.fileReadyDom = true;
+      notifyFileReady(true);
       return null;
     }
     const mo = new MutationObserver((mutations) => {
@@ -656,6 +681,7 @@
         if (m.type === "characterData") {
           if (m.target.textContent?.includes(needle)) {
             batch.fileReadyDom = true;
+            notifyFileReady(true);
             mo.disconnect();
             return;
           }
@@ -665,6 +691,7 @@
             node.nodeType === 3 ? node.textContent : node.nodeType === 1 ? node.innerText : "";
           if (t?.includes(needle)) {
             batch.fileReadyDom = true;
+            notifyFileReady(true);
             mo.disconnect();
             return;
           }
@@ -695,30 +722,68 @@
     return null;
   }
 
-  function sendAndConfirm() {
-    // 先点发送按钮，2.5s 未确认则补一次 Enter 键；
+  // 等发送按钮可用：MutationObserver 监听页面变化（disabled/class 属性或节点重建），事件驱动不轮询
+  function waitSendEnabled(timeoutMs) {
+    return new Promise((resolve) => {
+      const check = () => {
+        if (batch.stop) return true;
+        const b = findSendButton();
+        if (!b) return false;
+        const disabled =
+          b.disabled === true ||
+          b.getAttribute("aria-disabled") === "true" ||
+          b.className?.includes?.("disabled");
+        return !disabled;
+      };
+      if (check()) return resolve(true);
+      const mo = new MutationObserver(() => {
+        if (check()) {
+          mo.disconnect();
+          resolve(true);
+        }
+      });
+      mo.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["disabled", "class", "aria-disabled"],
+      });
+      const timer = setTimeout(() => {
+        mo.disconnect();
+        resolve(check());
+      }, timeoutMs);
+    });
+  }
+
+  async function sendAndConfirm() {
+    // 先等发送按钮可用（DeepSeek 文件未上传完成时按钮禁用，点击无效白等）；
+    // 点按钮后 1.5s 未确认则补一次 Enter。
     // 确认依据 = completion 请求已发出（xhrProto.send 里置 batch.sent）或 URL 跳会话页
     batch.sent = false;
+    const enabled = await waitSendEnabled(10000);
+    if (batch.stop) return false;
+    logMsg(enabled ? "发送按钮可用，点击发送" : "发送按钮 10s 内未变为可用，直接尝试");
     const btn = findSendButton();
     if (btn) btn.click();
-    return waitFor(
+    else logMsg("未找到发送按钮");
+    const ok = await waitFor(
       () => batch.sent || /\/a\/chat\/s\//.test(location.href) || batch.stop,
-      2500,
-    ).then((ok) => {
-      if (ok || batch.stop) return !batch.stop;
-      const input = findInput();
-      if (!input) return false;
-      input.dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key: "Enter",
-          code: "Enter",
-          keyCode: 13,
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
-      return waitFor(() => batch.sent || /\/a\/chat\/s\//.test(location.href), 4000);
-    });
+      1500,
+    );
+    if (ok || batch.stop) return !batch.stop;
+    logMsg("发送未确认，改用 Enter");
+    const input = findInput();
+    if (!input) return false;
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        code: "Enter",
+        keyCode: 13,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    return waitFor(() => batch.sent || /\/a\/chat\/s\//.test(location.href), 4000);
   }
 
   // 确保输入框干净：会话页先回首页；首页有残留草稿则开新对话清除。
@@ -763,7 +828,7 @@
     batch.fileReadyDom = false;
     batch.uploadId = "";
     const mo = watchFileAppear(file.name);
-    const ready = await waitForFileReady(file.name, 30000);
+    const ready = await waitFileReady(file.name, 30000);
     if (mo) mo.disconnect();
     if (batch.stop) throw new Error("已停止");
     if (!ready) {
