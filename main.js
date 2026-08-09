@@ -95,8 +95,9 @@
       return row;
     }
 
-    // 行内编辑行：label + ✎，点击换成输入框（回车/失焦保存），用于提示词、发送间隔等配置
-    function inlineEditRow(prefix, getText, onSave) {
+    // 行内编辑行：label + ✎，点击换成输入框（回车/失焦保存）。
+    // getText 是显示文案；getEdit（可选）是输入框里的可编辑值（如 label 显示「3~5s 随机」、输入框显示「3」）
+    function inlineEditRow(prefix, getText, onSave, getEdit) {
       const row = document.createElement("div");
       row.style.cssText = rowStyle;
       const label = document.createElement("span");
@@ -113,7 +114,7 @@
       row.addEventListener("click", () => {
         const input = document.createElement("input");
         input.type = "text";
-        input.value = getText();
+        input.value = getEdit ? getEdit() : getText();
         input.style.cssText =
           "flex:1;min-width:0;background:#111;color:#fff;border:1px solid #4d6bfe;" +
           "border-radius:6px;padding:3px 6px;font-size:11px;outline:none;";
@@ -147,7 +148,7 @@
         GM_setValue(STORAGE.PROMPT, promptText);
       },
     );
-    // 发送间隔行（基准秒，实际基准~基准+2s 随机；批量防风控）
+    // 发送间隔行（基准秒，实际基准~基准+2s 随机；批量防风控）。输入框直接输基准数字
     const delayRow = inlineEditRow(
       "发送间隔: ",
       () => sendDelaySec + "~" + (sendDelaySec + 2) + "s 随机",
@@ -158,6 +159,7 @@
           GM_setValue(STORAGE.DELAY, n);
         }
       },
+      () => String(sendDelaySec),
     );
 
     const batchBtn = document.createElement("button");
