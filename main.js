@@ -585,18 +585,38 @@
         }
       }
       if (short.startsWith("/api/v0/file/upload_file")) {
-        logMsg("upload_file -> " + xhr.status);
         try {
           const d = JSON.parse(xhr.responseText);
-          const id = d?.data?.biz_data?.id;
+          const biz = d?.data?.biz_data || {};
+          logMsg(
+            "upload_file: " +
+              xhr.status +
+              " " +
+              (biz.status || "?") +
+              " (" +
+              (biz.name || "?") +
+              ")",
+          );
+          const id = biz.id;
           if (id) {
             batch.uploadId = id;
             logMsg("upload_file id: " + id.slice(0, 24) + "…");
           }
-        } catch {}
+        } catch {
+          logMsg("upload_file 响应解析失败: " + xhr.status);
+        }
       }
-      if (url.includes("/api/v0/chat/completion") && xhr.status === 200) {
-        // 生成完成信号以侧边栏标题为准（startSidebarCounter），这里不处理
+      if (url.includes("/api/v0/chat/completion")) {
+        // 发送响应：200 = 已受理（SSE 首行含消息状态），非 200 = 发送失败
+        if (xhr.status === 200) {
+          const first =
+            String(xhr.responseText || "")
+              .split("\n")
+              .find((l) => l.trim().startsWith("data:")) || "";
+          logMsg("completion 响应: 200" + (first ? " | " + first.trim().slice(0, 100) : ""));
+        } else {
+          logMsg("completion 响应: " + xhr.status + "（发送失败）");
+        }
       }
     } catch (e) {
       logMsg("信号解析错误: " + url + " " + e.message);
