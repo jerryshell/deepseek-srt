@@ -604,6 +604,13 @@
               (biz.name || "?") +
               ")",
           );
+          // 完整响应体（截断）——服务器繁忙时的错误信息在这里面
+          logMsg(
+            "upload_file 响应: " +
+              String(xhr.responseText || "")
+                .replace(/\s+/g, " ")
+                .slice(0, 300),
+          );
           const id = biz.id;
           if (id) {
             batch.uploadId = id;
@@ -724,16 +731,26 @@
       let stop = null;
       let done = false;
       let timeoutId = null;
+      let errCheck = null;
       // 统一出口：resolve 后立刻清理超时与轮询，避免残留回调打噪音日志/误 resolve
       const waiter = (ok) => {
         if (done) return;
         done = true;
         clearTimeout(timeoutId);
+        clearInterval(errCheck);
         if (stop) stop();
         fileReadyWaiters = fileReadyWaiters.filter((w) => w !== waiter);
         resolve(ok);
       };
       fileReadyWaiters.push({ name, resolve: waiter });
+      // DeepSeek 对上传失败的文件显示「请删除异常文件再发送」，检测到立即判失败，不空等
+      errCheck = setInterval(() => {
+        if (done) return;
+        if (document.body.innerText.includes("请删除异常文件")) {
+          logMsg("检测到「请删除异常文件」提示，文件上传失败");
+          waiter(false);
+        }
+      }, 1000);
       // upload_file 10s 无 id（服务器繁忙/响应异常）→ 快速失败，不空等 30s
       setTimeout(() => {
         if (done) return;
