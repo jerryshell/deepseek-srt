@@ -230,6 +230,7 @@
       ),
     );
     body.appendChild(promptRow);
+    body.appendChild(delayRow);
     body.appendChild(batchBtn);
     setBatchBtnState();
 
