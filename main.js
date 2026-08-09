@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek SRT 上传助手 + YouTube 字幕下载
 // @namespace    http://tampermonkey.net/
-// @version      3.1
+// @version      3.2
 // @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt/.md 时自动填入提示词。批量处理 MD 文件（并发 2 自动排队）。YouTube 页面添加“下载字幕”按钮。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
@@ -36,14 +36,26 @@
     const panel = document.createElement("div");
     panel.id = "ds-panel";
     panel.style.cssText =
-      "position:fixed;right:12px;top:64px;z-index:2147483000;width:172px;" +
+      "position:fixed;right:12px;top:64px;z-index:2147483000;width:190px;" +
       "background:rgba(24,24,27,.96);color:#fff;border-radius:10px;padding:10px 0;" +
       "font-size:12px;box-shadow:0 4px 20px rgba(0,0,0,.35);user-select:none;";
 
+    // 标题栏：点击收起/展开面板内容
     const title = document.createElement("div");
-    title.textContent = "SRT 助手";
+    title.id = "ds-title";
+    title.textContent = "SRT 助手 ▼";
     title.style.cssText =
-      "padding:0 12px 8px;font-weight:600;border-bottom:1px solid rgba(255,255,255,.12);margin-bottom:4px;";
+      "padding:0 12px 8px;font-weight:600;border-bottom:1px solid rgba(255,255,255,.12);" +
+      "margin-bottom:4px;cursor:pointer;";
+    const body = document.createElement("div");
+    body.id = "ds-body";
+    panel.appendChild(title);
+    panel.appendChild(body);
+    title.addEventListener("click", () => {
+      const open = body.style.display === "none";
+      body.style.display = open ? "" : "none";
+      title.textContent = open ? "SRT 助手 ▼" : "SRT 助手 ▶";
+    });
 
     const rowStyle =
       "display:flex;align-items:center;justify-content:space-between;padding:5px 12px;cursor:pointer;";
@@ -55,11 +67,20 @@
       const span = document.createElement("span");
       span.textContent = label;
       span.style.cssText = labelStyle;
+      // 滑动开关
       const state = document.createElement("span");
+      state.style.cssText =
+        "width:26px;height:14px;border-radius:7px;background:#3f3f46;position:relative;" +
+        "transition:background .15s;flex-shrink:0;";
+      const knob = document.createElement("span");
+      knob.style.cssText =
+        "position:absolute;top:2px;left:2px;width:10px;height:10px;border-radius:50%;" +
+        "background:#a1a1aa;transition:left .15s,background .15s;";
+      state.appendChild(knob);
       const paint = () => {
-        state.textContent = get() ? "开" : "关";
-        state.style.color = get() ? "#4ade80" : "#a1a1aa";
-        state.style.fontWeight = "600";
+        state.style.background = get() ? "#4d6bfe" : "#3f3f46";
+        knob.style.left = get() ? "14px" : "2px";
+        knob.style.background = get() ? "#fff" : "#a1a1aa";
       };
       paint();
       row.appendChild(span);
@@ -75,21 +96,51 @@
     const promptRow = document.createElement("div");
     promptRow.style.cssText = rowStyle;
     const promptLabel = document.createElement("span");
-    promptLabel.style.cssText = labelStyle;
+    promptLabel.style.cssText =
+      labelStyle + "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
     const paintPrompt = () => {
       promptLabel.textContent =
         "提示词: " + (promptText.length > 8 ? promptText.slice(0, 8) + "…" : promptText);
     };
     paintPrompt();
     promptRow.appendChild(promptLabel);
+    promptRow.appendChild(editIcon());
+    // 点击 → 行内编辑（替换为输入框，回车/失焦保存）
     promptRow.addEventListener("click", () => {
-      const input = prompt("拖入 SRT / MD 后自动填入的提示词：", promptText);
-      if (input !== null && input.trim()) {
-        promptText = input.trim();
-        GM_setValue(STORAGE.PROMPT, promptText);
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = promptText;
+      input.style.cssText =
+        "flex:1;min-width:0;background:#111;color:#fff;border:1px solid #4d6bfe;" +
+        "border-radius:6px;padding:3px 6px;font-size:11px;outline:none;";
+      promptLabel.replaceWith(input);
+      input.focus();
+      input.select();
+      const save = () => {
+        const v = input.value.trim();
+        if (v) {
+          promptText = v;
+          GM_setValue(STORAGE.PROMPT, promptText);
+        }
+        input.replaceWith(promptLabel);
         paintPrompt();
-      }
+      };
+      input.addEventListener("blur", save);
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          save();
+        }
+        if (e.key === "Escape") input.replaceWith(promptLabel);
+      });
     });
+
+    function editIcon() {
+      const ic = document.createElement("span");
+      ic.textContent = "✎";
+      ic.style.cssText = "color:#71717a;margin-left:6px;flex-shrink:0;";
+      return ic;
+    }
 
     const batchBtn = document.createElement("button");
     batchBtn.id = "ds-batch-btn";
@@ -102,9 +153,8 @@
         stopBatch();
         return;
       }
-      if (batch.tasks.length) {
-        const files = batch.pendingFiles;
-        if (files?.length) runBatch(files);
+      if (batch.tasks.length && batch.pendingFiles?.length) {
+        runBatch(batch.pendingFiles);
       } else {
         pickBatchFiles();
       }
@@ -134,9 +184,8 @@
     taskBox.appendChild(taskHead);
     taskBox.appendChild(taskList);
 
-    panel.appendChild(title);
-    panel.appendChild(taskBox);
-    panel.appendChild(
+    body.appendChild(taskBox);
+    body.appendChild(
       toggleRow(
         "自动填空 (SRT)",
         STORAGE.ENABLED,
@@ -144,7 +193,7 @@
         (v) => (autoFillEnabled = v),
       ),
     );
-    panel.appendChild(
+    body.appendChild(
       toggleRow(
         "自动填空 (MD)",
         STORAGE.MD,
@@ -152,7 +201,7 @@
         (v) => (mdAutoFillEnabled = v),
       ),
     );
-    panel.appendChild(
+    body.appendChild(
       toggleRow(
         "发送后新对话",
         STORAGE.NEWCHAT,
@@ -160,8 +209,8 @@
         (v) => (newChatAfterSend = v),
       ),
     );
-    panel.appendChild(promptRow);
-    panel.appendChild(batchBtn);
+    body.appendChild(promptRow);
+    body.appendChild(batchBtn);
     setBatchBtnState();
 
     const statusRow = document.createElement("div");
@@ -170,13 +219,60 @@
       "margin:8px 12px 0;padding-top:8px;border-top:1px solid rgba(255,255,255,.12);" +
       "color:#a1a1aa;font-size:11px;line-height:1.5;";
     statusRow.textContent = getStatusText();
-    panel.appendChild(statusRow);
+    body.appendChild(statusRow);
+
+    // 进度条（运行中显示）
+    const progress = document.createElement("div");
+    progress.id = "ds-progress";
+    progress.style.cssText =
+      "margin:4px 12px 0;height:3px;border-radius:2px;background:#27272a;overflow:hidden;display:none;";
+    const bar = document.createElement("div");
+    bar.style.cssText = "height:100%;width:0;background:#4d6bfe;transition:width .3s;";
+    progress.appendChild(bar);
+    body.appendChild(progress);
 
     const notice = document.createElement("div");
     notice.id = "ds-notice";
     notice.style.cssText =
       "margin:6px 12px 0;color:#a1a1aa;font-size:11px;line-height:1.4;min-height:1.2em;word-break:break-all;";
-    panel.appendChild(notice);
+    body.appendChild(notice);
+
+    // 日志区：默认收起，点击标题展开；运行中自动展开
+    const logHead = document.createElement("div");
+    logHead.style.cssText =
+      "display:flex;align-items:center;justify-content:space-between;margin:6px 12px 0;" +
+      "cursor:pointer;font-size:11px;color:#a1a1aa;";
+    const logTitle = document.createElement("span");
+    logTitle.textContent = "运行日志 ▸";
+    const copyBtn = document.createElement("button");
+    copyBtn.textContent = "复制日志";
+    copyBtn.style.cssText =
+      "padding:2px 8px;background:#3f3f46;color:#e4e4e7;border:none;border-radius:6px;" +
+      "cursor:pointer;font-size:10px;";
+    copyBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const text = batch.logs.join("\n") || "（无日志）";
+      navigator.clipboard.writeText(text).then(() => {
+        const prev = copyBtn.textContent;
+        copyBtn.textContent = "已复制！";
+        setTimeout(() => (copyBtn.textContent = prev), 1200);
+      });
+    });
+    logHead.appendChild(logTitle);
+    logHead.appendChild(copyBtn);
+    const logBox = document.createElement("div");
+    logBox.id = "ds-log";
+    logBox.style.cssText =
+      "display:none;margin:4px 12px 10px;max-height:130px;overflow-y:auto;font-family:monospace;" +
+      "font-size:10px;color:#71717a;line-height:1.5;user-select:text;word-break:break-all;";
+    body.appendChild(logHead);
+    body.appendChild(logBox);
+    const toggleLog = (show) => {
+      logBox.style.display = show ? "block" : "none";
+      logTitle.textContent = show ? "运行日志 ▾" : "运行日志 ▸";
+    };
+    logHead.addEventListener("click", () => toggleLog(logBox.style.display === "none"));
+    window.__dsToggleLog = toggleLog;
 
     document.body.appendChild(panel);
     return statusRow;
@@ -201,8 +297,8 @@
         (batch.done + batch.failed) +
         "/" +
         batch.total +
-        "（生成中 " +
-        batch.generating +
+        "（进行中 " +
+        countNewChatSessions() +
         "）"
       );
     }
@@ -224,6 +320,17 @@
     }
     const status = panel.querySelector("#ds-status");
     if (status) status.textContent = getStatusText();
+    // 进度条同步
+    const progress = panel.querySelector("#ds-progress");
+    const bar = progress?.firstChild;
+    if (progress && bar) {
+      if (batch.running && batch.total > 0) {
+        progress.style.display = "block";
+        bar.style.width = ((batch.done + batch.failed) / batch.total) * 100 + "%";
+      } else {
+        progress.style.display = "none";
+      }
+    }
   }, 1500);
 
   // === 核心：拦截 File 名称，把 .srt 伪装成 .txt ===
@@ -399,7 +506,6 @@
   const batch = {
     running: false,
     queue: [],
-    generating: 0,
     stop: false,
     fileReady: false,
     currentFileName: "",
@@ -408,8 +514,7 @@
     errors: [],
     tasks: [],
     pendingFiles: null,
-    fileLog: [],
-    debug: [],
+    logs: [],
     total: 0,
     done: 0,
     failed: 0,
@@ -426,25 +531,34 @@
     });
   }
 
-  // XHR 信号（DeepSeek 全部走 axios/XHR）：fetch_files 轮询到 SUCCESS=文件就绪；
-  // chat/completion 的 load=SSE 流结束=生成完成。
-  function dbg(line) {
-    if (!Array.isArray(batch.fileLog)) return;
+  // 全部运行日志进面板（ds-log），随时可复制；同时输出到 console 备份。
+  function logMsg(line) {
     const d = new Date();
     const ts =
       String(d.getMinutes()).padStart(2, "0") + ":" + String(d.getSeconds()).padStart(2, "0");
-    batch.fileLog.push("[" + ts + "] " + line);
+    batch.logs.push("[" + ts + "] " + line);
+    if (batch.logs.length > 400) batch.logs.shift();
+    const box = document.getElementById("ds-log");
+    if (box) {
+      // 运行中自动展开日志区
+      if (typeof window.__dsToggleLog === "function") window.__dsToggleLog(true);
+      const row = document.createElement("div");
+      row.textContent = "[" + ts + "] " + line;
+      box.appendChild(row);
+      box.scrollTop = box.scrollHeight;
+    }
+    console.log("[批量]", line);
   }
 
   function handleDeepSeekSignals(url, xhr) {
-    if (!batch.running && batch.generating === 0) return;
+    if (!batch.running) return;
     try {
       const short = url.replace("https://chat.deepseek.com", "");
       if (url.includes("fetch_files")) {
         const d = JSON.parse(xhr.responseText);
         const files = d?.data?.biz_data?.files || d?.data?.files || [];
         const summary = files.map((f) => (f.file_name || f.name) + ":" + (f.status || "?"));
-        dbg(
+        logMsg(
           "fetch_files(" +
             xhr.status +
             "): " +
@@ -455,24 +569,15 @@
         const f = files.find((f) => (f.file_name || f.name) === batch.currentFileName);
         if (f?.status === "SUCCESS") batch.fileReady = true;
       }
-      if (short.startsWith("/api/v0/file/upload_file")) dbg("upload_file -> " + xhr.status);
+      if (short.startsWith("/api/v0/file/upload_file")) logMsg("upload_file -> " + xhr.status);
       if (url.includes("/api/v0/chat/completion") && xhr.status === 200) {
-        if (batch.generating > 0) {
-          batch.generating--;
-          const done = batch.tasks.find((t) => t.status === "生成中");
-          if (done) {
-            done.status = "完成";
-            renderTaskList();
-          }
-          console.log("[批量] 一个总结完成，剩余生成中:", batch.generating);
-        }
+        // 生成完成信号以侧边栏标题为准（startSidebarCounter），这里不处理
       }
     } catch (e) {
-      console.error("[批量] 信号解析错误:", url, e.message);
+      logMsg("信号解析错误: " + url + " " + e.message);
     }
   }
 
-  // 后备信号：附件 chip 出现在输入框附近（fetch_files 解析失败时兜底）
   // 后备信号：附件 chip 出现在输入框附近（fetch_files 解析失败时兜底）。
   // MutationObserver 事件驱动，不轮询。返回 observer 供调用方清理。
   function watchFileAppear(name) {
@@ -567,8 +672,7 @@
 
   async function processFile(origFile) {
     await ensureHomeInput();
-    batch.fileLog = [];
-    dbg("== 上传开始: " + origFile.name);
+    logMsg("== 上传开始: " + origFile.name);
     const task = batch.tasks.find((t) => t.status === "等待");
     if (task) {
       task.status = "处理中";
@@ -588,7 +692,7 @@
     if (mo) mo.disconnect();
     if (batch.stop) throw new Error("已停止");
     if (!ready) {
-      batch.debug.push("【" + file.name + "】", ...batch.fileLog);
+      logMsg("上传超时: " + file.name);
       throw new Error("上传超时（附件区未出现文件）");
     }
 
@@ -603,12 +707,11 @@
     await sendAndConfirm();
     const sent = await waitFor(() => batch.sent || /\/a\/chat\/s\//.test(location.href), 7000);
     if (!sent) throw new Error("发送未确认（无 completion 请求）");
-    batch.generating++;
     if (task) {
       task.status = "生成中";
       renderTaskList();
     }
-    console.log("[批量] 已发送:", file.name, "| 生成中:", batch.generating);
+    logMsg("已发送: " + file.name);
   }
 
   // === 批量任务浮层 ===
@@ -684,7 +787,7 @@
       return;
     }
     btn.style.background = "#4d6bfe";
-    if (batch.tasks.length) {
+    if (batch.tasks.length && batch.pendingFiles?.length) {
       btn.textContent = "开始处理（" + batch.tasks.length + "）";
       return;
     }
@@ -694,7 +797,7 @@
   function stopBatch() {
     batch.stop = true;
     batch.running = false;
-    batch.generating = 0; // 已发出的生成不撤销，但释放并发闸
+    batch.pendingFiles = null; // 已停止的批次作废，重新选文件
     batch.tasks.forEach((t) => {
       if (t.status === "处理中" || t.status === "生成中" || t.status === "等待") {
         t.status = "已停止";
@@ -722,32 +825,37 @@
     setBatchBtnState();
   }
 
-  function showResult() {
-    const log = ["成功 " + batch.done + "，失败 " + batch.failed + "，共 " + batch.total + " 个"];
-    if (batch.errors.length) {
-      log.push("", "失败明细：");
-      batch.errors.forEach((e, i) => log.push(i + 1 + ". " + e.file + "： " + e.msg));
-    }
-    if (batch.debug.length) {
-      log.push("", "诊断日志（上传环节）:");
-      log.push(...batch.debug);
-    }
-    const text = document.createElement("textarea");
-    text.readOnly = true;
-    text.value = log.join("\n");
-    text.style.cssText =
-      "flex:1;margin-top:10px;background:#111;color:#e4e4e7;border:1px solid #3f3f46;" +
-      "border-radius:8px;padding:8px;font-size:11px;resize:none;height:50vh;min-height:240px;";
-    const overlay = createOverlay("批量处理完成", text, [
-      ovlBtn("复制日志", true, () => {
-        navigator.clipboard.writeText(text.value).then(() => {
-          const prev = text.value;
-          text.value = "已复制！";
-          setTimeout(() => (text.value = prev), 1200);
-        });
-      }),
-      ovlBtn("关闭", false, () => overlay.remove()),
-    ]);
+  let sidebarBaseline = 0;
+  let lastNewChatCount = 0;
+
+  function countNewChatSessions() {
+    return Math.max(
+      0,
+      [...document.querySelectorAll('a[href*="/a/chat/s/"]')].filter((l) =>
+        /新对话/.test(l.innerText || ""),
+      ).length - sidebarBaseline,
+    );
+  }
+
+  // 侧边栏「新对话」会话数 = 真实进行中任务数（处理中 + 生成中）。
+  // 生成完成时 DeepSeek 自动把标题改为内容摘要，计数减少 → 标记一个任务完成。
+  let sidebarObserver = null;
+  function startSidebarCounter() {
+    if (sidebarObserver) sidebarObserver.disconnect();
+    lastNewChatCount = countNewChatSessions();
+    sidebarObserver = new MutationObserver(() => {
+      const c = countNewChatSessions();
+      const delta = lastNewChatCount - c;
+      lastNewChatCount = c;
+      for (let i = 0; i < delta; i++) {
+        const t = batch.tasks.find((t) => t.status === "生成中");
+        if (t) {
+          t.status = "完成";
+          renderTaskList();
+        }
+      }
+    });
+    sidebarObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
   }
 
   async function runBatch(files) {
@@ -759,11 +867,16 @@
     batch.done = 0;
     batch.failed = 0;
     batch.errors = [];
-    batch.debug = [];
+    batch.logs = [];
+    const logBox = document.getElementById("ds-log");
+    if (logBox) logBox.innerHTML = "";
+    sidebarBaseline = countNewChatSessions(); // 历史「新对话」会话（用户手动开的）不计入并发
+    lastNewChatCount = 0;
+    startSidebarCounter();
     setBatchBtnState();
-    console.log("[批量] 开始，共", batch.queue.length, "个文件（并发 2）");
+    logMsg("开始，共 " + batch.queue.length + " 个文件（并发 2）");
     while (batch.queue.length && !batch.stop) {
-      await waitFor(() => batch.generating < MAX_CONCURRENT || batch.stop, 3600 * 1000);
+      await waitFor(() => countNewChatSessions() < MAX_CONCURRENT || batch.stop, 3600 * 1000);
       if (batch.stop) break;
       const file = batch.queue.shift();
       try {
@@ -779,21 +892,13 @@
           failedTask.status = "失败";
           renderTaskList();
         }
-        console.error("[批量] 失败:", file.name, "-", e.message);
+        logMsg("失败: " + file.name + " - " + e.message);
       }
     }
-    await waitFor(() => batch.generating === 0 || batch.stop, 7200 * 1000);
+    await waitFor(() => countNewChatSessions() === 0 || batch.stop, 7200 * 1000);
     batch.running = false;
-    console.log(
-      "[批量] 结束：成功",
-      batch.done,
-      "失败",
-      batch.failed,
-      batch.stop ? "（已停止）" : "",
-    );
+    logMsg("结束：成功 " + batch.done + " 失败 " + batch.failed + (batch.stop ? "（已停止）" : ""));
     setBatchBtnState();
-    if (batch.stop) return; // 用户主动停止：不弹结果窗
-    showResult();
   }
 
   function pickBatchFiles() {
