@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek SRT 上传助手 + YouTube 字幕下载
 // @namespace    http://tampermonkey.net/
-// @version      3.4
+// @version      3.9
 // @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt/.md 时自动填入提示词。批量处理 MD 文件（并发 2 自动排队）。YouTube 页面添加“下载字幕”按钮。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
@@ -38,33 +38,64 @@
     const panel = document.createElement("div");
     panel.id = "ds-panel";
     panel.style.cssText =
-      "position:fixed;right:12px;top:64px;z-index:2147483000;width:280px;" +
-      "background:rgba(24,24,27,.96);color:#fff;border-radius:10px;padding:10px 0;" +
-      "font-size:12px;box-shadow:0 4px 20px rgba(0,0,0,.35);user-select:none;";
+      "position:fixed;right:12px;top:64px;z-index:2147483000;font-size:12px;color:#fff;" +
+      "user-select:none;border-radius:14px;border:1px solid rgba(255,255,255,.08);" +
+      "display:flex;align-items:center;justify-content:center;";
+    // hover/运行态样式（内联样式写不了 :hover，注入一次样式表）
+    const dsStyle = document.createElement("style");
+    dsStyle.textContent =
+      '#ds-panel[data-open="0"]{cursor:pointer;}' +
+      '#ds-panel[data-open="0"]:hover{filter:brightness(1.15);}' +
+      "#ds-panel .ds-row:hover{background:rgba(255,255,255,.05);}" +
+      '#ds-panel[data-open="0"] #ds-title{font-weight:700;}' +
+      '#ds-panel[data-open="1"] #ds-title{font-weight:600;}' +
+      '#ds-panel[data-open="1"] #ds-title span:last-child{color:#71717a;font-size:15px;line-height:1;}' +
+      "#ds-batch-btn:hover{filter:brightness(1.12);}";
+    document.head.appendChild(dsStyle);
 
-    // 标题栏：点击收起/展开面板内容
+    // 标题栏：默认折叠为渐变小按钮，点击展开/收起
     const title = document.createElement("div");
     title.id = "ds-title";
-    title.textContent = "SRT 助手 ▼";
     title.style.cssText =
-      "padding:0 12px 8px;font-weight:600;border-bottom:1px solid rgba(255,255,255,.12);" +
-      "margin-bottom:4px;cursor:pointer;";
+      "display:flex;align-items:center;justify-content:space-between;padding:0;";
     const body = document.createElement("div");
     body.id = "ds-body";
     panel.appendChild(title);
     panel.appendChild(body);
-    title.addEventListener("click", () => {
-      const open = body.style.display === "none";
+    const apply = (open) => {
+      panel.dataset.open = open ? "1" : "0";
+      panel.style.display = open ? "block" : "flex";
+      panel.style.width = open ? "280px" : "48px";
+      panel.style.height = open ? "auto" : "48px";
+      panel.style.padding = open ? "10px 0" : "0";
+      panel.style.background = open ? "rgba(17,17,22,.95)" : "#4d6bfe";
+      panel.style.boxShadow = open ? "0 4px 16px rgba(0,0,0,.35)" : "0 2px 8px rgba(0,0,0,.3)";
+      title.style.padding = open ? "0 12px 8px" : "0";
+      title.style.borderBottom = open ? "1px solid rgba(255,255,255,.1)" : "none";
+      title.style.marginBottom = open ? "4px" : "0";
+      title.innerHTML = open ? "<span>SRT 助手</span><span>−</span>" : "SRT";
       body.style.display = open ? "" : "none";
-      title.textContent = open ? "SRT 助手 ▼" : "SRT 助手 ▶";
+    };
+    apply(false); // 默认折叠
+    panel.expand = () => apply(true); // 供错误通知自动展开
+    panel.addEventListener("click", () => {
+      if (body.style.display === "none") apply(true);
+    });
+    title.addEventListener("click", (e) => {
+      if (body.style.display !== "none") {
+        e.stopPropagation();
+        apply(false);
+      }
     });
 
     const rowStyle =
-      "display:flex;align-items:center;justify-content:space-between;padding:5px 12px;cursor:pointer;";
+      "display:flex;align-items:center;justify-content:space-between;" +
+      "padding:6px 8px;margin:1px 8px;border-radius:8px;cursor:pointer;";
     const labelStyle = "color:#e4e4e7;";
 
     function toggleRow(label, key, get, set) {
       const row = document.createElement("div");
+      row.className = "ds-row";
       row.style.cssText = rowStyle;
       const span = document.createElement("span");
       span.textContent = label;
@@ -73,11 +104,11 @@
       const state = document.createElement("span");
       state.style.cssText =
         "width:26px;height:14px;border-radius:7px;background:#3f3f46;position:relative;" +
-        "transition:background .15s;flex-shrink:0;";
+        "flex-shrink:0;";
       const knob = document.createElement("span");
       knob.style.cssText =
         "position:absolute;top:2px;left:2px;width:10px;height:10px;border-radius:50%;" +
-        "background:#a1a1aa;transition:left .15s,background .15s;";
+        "background:#a1a1aa;";
       state.appendChild(knob);
       const paint = () => {
         state.style.background = get() ? "#4d6bfe" : "#3f3f46";
@@ -99,6 +130,7 @@
     // getText 是显示文案；getEdit（可选）是输入框里的可编辑值（如 label 显示「3~5s 随机」、输入框显示「3」）
     function inlineEditRow(prefix, getText, onSave, getEdit) {
       const row = document.createElement("div");
+      row.className = "ds-row";
       row.style.cssText = rowStyle;
       const label = document.createElement("span");
       label.style.cssText =
@@ -166,7 +198,7 @@
     batchBtn.id = "ds-batch-btn";
     batchBtn.textContent = "批量上传 MD/SRT";
     batchBtn.style.cssText =
-      "width:calc(100% - 24px);margin:6px 12px 2px;padding:7px 0;border:none;border-radius:8px;" +
+      "width:calc(100% - 24px);margin:6px 12px 2px;padding:8px 0;border:none;border-radius:8px;" +
       "background:#4d6bfe;color:#fff;font-size:12px;font-weight:600;cursor:pointer;";
     batchBtn.addEventListener("click", () => {
       if (batch.running) {
@@ -250,7 +282,7 @@
     progress.style.cssText =
       "margin:4px 12px 0;height:3px;border-radius:2px;background:#27272a;overflow:hidden;display:none;";
     const bar = document.createElement("div");
-    bar.style.cssText = "height:100%;width:0;background:#4d6bfe;transition:width .3s;";
+    bar.style.cssText = "height:100%;width:0;background:#4d6bfe;";
     progress.appendChild(bar);
     body.appendChild(progress);
 
@@ -303,6 +335,7 @@
   function panelNotice(text, isError) {
     const panel = document.getElementById("ds-panel");
     if (!panel) buildPanel();
+    if (isError) panel.expand?.(); // 错误时自动展开面板
     const notice = document.getElementById("ds-notice");
     if (!notice) return;
     notice.textContent = text;
@@ -332,7 +365,7 @@
         batch.failed +
         (batch.lastError ? "｜" + batch.lastError : "")
       );
-    return "就绪";
+    return ""; // 无任务时不显示状态
   }
 
   // 面板状态刷新：并入 logMsg（batch 每次变化的必经点）
@@ -574,6 +607,11 @@
     if (panel) {
       const status = panel.querySelector("#ds-status");
       if (status) status.textContent = getStatusText();
+      // 折叠时小按钮显示运行红点
+      if (panel.dataset.open === "0") {
+        const t = panel.querySelector("#ds-title");
+        if (t) t.innerHTML = batch.running ? 'SRT <span style="color:#f87171">●</span>' : "SRT";
+      }
       const progress = panel.querySelector("#ds-progress");
       const bar = progress?.firstChild;
       if (progress && bar) {
