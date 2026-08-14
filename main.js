@@ -677,6 +677,11 @@
         try {
           const d = JSON.parse(xhr.responseText);
           const biz = d?.data?.biz_data || {};
+          // 服务器限流：立即停批，继续上传只会重复触发限流并残留异常附件
+          if (d?.data?.biz_code === 7 || /rate limit/i.test(String(d?.data?.biz_msg || ""))) {
+            logMsg("触发 rate limit（服务器限流），停止批量。建议调大发送间隔或稍后再试");
+            batch.stop = true;
+          }
           logMsg(
             "upload_file: " +
               xhr.status +
@@ -761,12 +766,13 @@
   }
   // 主动 fetch_files 轮询：前端可能不发 fetch，必须等到明确状态才发送。返回停止函数。
   function pollFileStatus(name, resolve) {
-    let timer = null;
+    let stopped = false;
     let netErrLogged = false; // 网络错误只打一次，避免刷屏
     const poll = async () => {
-      // 不自停：XHR SUCCESS 会触发 waiter（stop 清调度），在途请求多余但无害
+      // 循环头检查停止标志：stop 可能在 await fetch 期间被调用，只清 timer 拦不住新一轮
+      if (stopped) return;
       const id = batch.uploadId;
-      if (!id) return (timer = setTimeout(poll, 2000));
+      if (!id) return setTimeout(poll, 2000);
       try {
         const r = await fetch("/api/v0/file/fetch_files?file_ids=" + encodeURIComponent(id), {
           credentials: "include",
@@ -809,10 +815,12 @@
           logMsg("主动 fetch_files: 请求异常 " + e.message);
         }
       }
-      timer = setTimeout(poll, 2000);
+      // fetch 返回后再查一次停止标志（stop 可能在 await 期间被调）
+      if (stopped) return;
+      setTimeout(poll, 2000);
     };
     poll();
-    return () => clearTimeout(timer);
+    return () => (stopped = true);
   }
   async function waitFileReady(name, timeoutMs) {
     if (batch.fileReady || batch.stop) return true;
@@ -959,6 +967,11 @@
     let round = 0;
     while (Date.now() < deadline && !batch.stop) {
       round++;
+      // 异常附件提示 = 当前文件无法发送，立即失败，不白等 30s 重试
+      if (document.body.innerText.includes("请删除异常文件")) {
+        logMsg("检测到「请删除异常文件」，发送中止");
+        return false;
+      }
       const btn = findSendButton();
       if (btn) {
         logMsg("点击发送按钮");
@@ -1313,6 +1326,12 @@
         } catch (e2) {
           logMsg("失败后清理异常: " + e2.message);
         }
+        // 确认异常附件提示已消失；仍残留则等几秒再验一次（服务器繁忙时提示可能延迟消失）
+        const errGone = await waitFor(
+          () => !document.body.innerText.includes("请删除异常文件"),
+          8000,
+        );
+        if (!errGone) logMsg("警告：异常文件提示未清除，下一个文件可能发送失败");
       }
     }
     await waitFor(() => countNewChatSessions() === 0 || batch.stop, 7200 * 1000);
