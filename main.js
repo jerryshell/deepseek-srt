@@ -1548,10 +1548,11 @@
   }
 
   // 生成 SRT 并触发下载；closeAfter 时尝试关闭标签页
-  function finishDownload(playerResponse, events, closeAfter) {
+  function finishDownload(events, closeAfter, title) {
     const srt = buildSrt(events);
-    const title = sanitizeFilename(playerResponse?.videoDetails?.title || "");
-    downloadSrt(srt, title + ".srt");
+    // SPA 切换后无播放器数据时用页面标题兜底
+    const base = title || document.title.replace(/ - YouTube$/, "").trim() || getYoutubeVideoId();
+    downloadSrt(srt, sanitizeFilename(base) + ".srt");
     if (closeAfter) {
       window.close();
       // 浏览器禁止关闭用户打开的标签页时，页面还在，此时提示
@@ -1567,7 +1568,26 @@
     try {
       const playerResponse = getPlayerResponse();
       if (!playerResponse) {
-        logMsg("YT 下载: 未获取到播放器数据");
+        // SPA 切换视频后 ytInitialPlayerResponse 不更新 → 降级：
+        // 触发字幕，复用 YT 自己的 timedtext 请求 URL（含 pot），不需要播放器数据
+        logMsg("YT 下载: 播放器数据过期（SPA 切换），改用 timedtext 缓存路径");
+        await ensureSubtitlesOn();
+        const u = await waitForTimedtextUrl(getYoutubeVideoId());
+        if (u) {
+          const r = await fetch(u);
+          if (r.ok) {
+            const text = await r.text();
+            try {
+              const events = JSON.parse(text).events || [];
+              if (events.length > 0) {
+                logMsg("YT 降级路径: " + events.length + " 条字幕事件");
+                finishDownload(events, closeAfter);
+                return;
+              }
+            } catch {}
+          }
+        }
+        logMsg("YT 下载: 未获取到播放器数据（无 timedtext 缓存）");
         alert("未获取到播放器数据，请刷新页面后重试");
         return;
       }
@@ -1613,7 +1633,7 @@
               const cachedEvents = JSON.parse(cachedText).events || [];
               if (cachedEvents.length > 0) {
                 logMsg("YT 缓存字幕解析: " + cachedEvents.length + " 条事件");
-                finishDownload(playerResponse, cachedEvents, closeAfter);
+                finishDownload(cachedEvents, closeAfter, playerResponse?.videoDetails?.title);
                 return;
               }
             } catch {
@@ -1646,7 +1666,7 @@
         return;
       }
 
-      finishDownload(playerResponse, events, closeAfter);
+      finishDownload(events, closeAfter, playerResponse?.videoDetails?.title);
       logMsg("YT 下载完成: " + (playerResponse.videoDetails?.title || "").slice(0, 40) + ".srt");
     } catch (error) {
       logMsg("YT 下载失败: " + error.message);
