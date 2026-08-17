@@ -2,7 +2,7 @@
 // @name         DeepSeek SRT 上传助手 + YouTube 字幕下载
 // @namespace    http://tampermonkey.net/
 // @version      3.10
-// @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt/.md 时自动填入提示词。批量处理 MD 文件（并发 2 自动排队）。YouTube 页面添加“下载字幕”按钮。
+// @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt / .md 时自动填入提示词。批量处理 MD 文件（并发 2 自动排队）。YouTube 页面添加「下载字幕」按钮。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
 // @match        https://www.youtube.com/*
