@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek SRT 上传助手 + YouTube 字幕下载
 // @namespace    http://tampermonkey.net/
-// @version      3.10
+// @version      3.11
 // @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt / .md 时自动填入提示词。批量处理 MD 文件（并发 2 自动排队）。YouTube 页面添加「下载字幕」按钮。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
@@ -18,7 +18,7 @@
 
   // === 配置 ===
   const DEFAULT_PROMPT =
-    "用通俗易懂的话总结，不用术语，不用破折号，用连贯、简单、简洁的语言表达，就像两个普通人在对话一样";
+    "通俗易懂总结，不用术语/破折号，用连贯/简单/简洁语言表达，就像两个普通人在对话";
   const DEFAULT_DELAY = 3; // 批量发送间隔基准（秒），实际 基准~基准+2s 随机，防风控
   const STORAGE = {
     ENABLED: "srtAutoFill",
