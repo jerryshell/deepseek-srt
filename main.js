@@ -371,6 +371,9 @@
   // 面板状态刷新：并入 logMsg（batch 每次变化的必经点）
 
   // === 核心：把 .srt 伪装成 .txt（拦截 File.name/type + FormData 替换）===
+  // .srt 检测与改名抽成两个 helper，5 处调用点共用
+  const isSrt = (name) => /\.srt$/i.test(name);
+  const toTxt = (name) => name.replace(/\.srt$/i, ".txt");
   const origNameDesc = Object.getOwnPropertyDescriptor(File.prototype, "name");
   const origTypeDesc = Object.getOwnPropertyDescriptor(File.prototype, "type");
 
@@ -379,9 +382,9 @@
     Object.defineProperty(File.prototype, "name", {
       get() {
         const name = origNameDesc.get.call(this);
-        if (/\.srt$/i.test(name)) {
+        if (isSrt(name)) {
           if (autoFillEnabled) scheduleAutoFill();
-          return name.replace(/\.srt$/i, ".txt");
+          return toTxt(name);
         }
         if (/\.md$/i.test(name) && mdAutoFillEnabled) scheduleAutoFill();
         return name;
@@ -395,7 +398,7 @@
     Object.defineProperty(File.prototype, "type", {
       get() {
         const name = origNameDesc.get.call(this);
-        return /\.srt$/i.test(name) ? "text/plain" : origTypeDesc.get.call(this);
+        return isSrt(name) ? "text/plain" : origTypeDesc.get.call(this);
       },
       configurable: true,
     });
@@ -407,9 +410,9 @@
     if (value instanceof File) {
       try {
         const name = origNameDesc.get.call(value);
-        if (/\.srt$/i.test(name)) {
-          logMsg("SRT 伪装: " + name + " → " + name.replace(/\.srt$/i, ".txt"));
-          return new File([value], name.replace(/\.srt$/i, ".txt"), {
+        if (isSrt(name)) {
+          logMsg("SRT 伪装: " + name + " → " + toTxt(name));
+          return new File([value], toTxt(name), {
             type: "text/plain",
             lastModified: value.lastModified,
           });
@@ -1044,8 +1047,8 @@
     }
     let file = origFile;
     // DeepSeek 不认 .srt，批量注入前伪装成 .txt（同单文件拖入逻辑）
-    if (/\.srt$/i.test(file.name)) {
-      file = new File([file], file.name.replace(/\.srt$/i, ".txt"), { type: "text/plain" });
+    if (isSrt(file.name)) {
+      file = new File([file], toTxt(file.name), { type: "text/plain" });
     }
     batch.currentFileName = file.name;
     if (!injectFile(file)) throw new Error("未找到文件输入框");
