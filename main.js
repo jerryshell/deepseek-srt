@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek SRT 上传助手 + YouTube 字幕下载
 // @namespace    http://tampermonkey.net/
-// @version      3.11
+// @version      3.12
 // @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt / .md 时自动填入提示词。批量处理 MD 文件（并发 2 自动排队）。YouTube 页面添加「下载字幕」按钮。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
@@ -1684,7 +1684,7 @@
     const button = document.createElement("button");
     button.textContent = text;
     button.style.cssText =
-      "margin-left:12px;align-self:center;flex-shrink:0;" +
+      "margin-left:0;flex-shrink:0;" +
       "padding:6px 14px;border:none;border-radius:18px;" +
       "background:#065fd4;color:#fff;font-size:13px;font-weight:500;" +
       "cursor:pointer;white-space:nowrap;";
@@ -1696,17 +1696,18 @@
     if (!location.hostname.endsWith("youtube.com")) return;
     if (document.getElementById("yt-srt-download-btn")) return;
 
-    // 视频标题右侧
-    const titleEl = document.querySelector("#above-the-fold h1");
-    if (!titleEl) return;
-    const container = titleEl.closest("#title") || titleEl.parentElement;
+    // 固定在元信息区右上角，不随标题长度/换行变化
+    const fold = document.querySelector("#above-the-fold");
+    if (!fold) return;
+    fold.style.position = "relative";
 
-    // 标题容器改成横向 flex，按钮才能跟在标题右侧
-    container.style.cssText = "display:flex;align-items:center;flex-direction:row;flex-wrap:wrap;";
+    const wrap = document.createElement("div");
+    wrap.style.cssText = "position:absolute;top:0;right:0;display:flex;gap:8px;z-index:10;";
     const btnDownload = createDownloadButton("下载字幕", false);
     btnDownload.id = "yt-srt-download-btn";
-    container.appendChild(btnDownload);
-    container.appendChild(createDownloadButton("下载并关闭", true));
+    wrap.appendChild(btnDownload);
+    wrap.appendChild(createDownloadButton("下载并关闭", true));
+    fold.appendChild(wrap);
   }
   setInterval(ensureYoutubeButton, 2000);
 
