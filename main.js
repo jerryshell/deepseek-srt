@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek SRT 上传助手 + YouTube 字幕下载
 // @namespace    http://tampermonkey.net/
-// @version      3.15
+// @version      3.17
 // @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt / .md 时自动填入提示词。批量处理 MD 文件（并发 2 自动排队）。YouTube 页面添加「下载字幕」按钮。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
@@ -690,10 +690,10 @@
         try {
           const d = JSON.parse(xhr.responseText);
           const biz = d?.data?.biz_data || {};
-          // 服务器限流：立即停批，继续上传只会重复触发限流并残留异常附件
+          // 服务器限流：标记后由 runBatch 把当前文件放回队首，等待后重试（不直接停批）
           if (d?.data?.biz_code === 7 || /rate limit/i.test(String(d?.data?.biz_msg || ""))) {
-            logMsg("触发 rate limit（服务器限流），停止批量。建议调大发送间隔或稍后再试");
-            batch.stop = true;
+            batch.rateLimited = true;
+            logMsg("触发 rate limit（服务器限流），该文件将延迟重试");
           }
           logMsg(
             "upload_file: " +
@@ -1257,12 +1257,32 @@
       if (batch.stop) break;
       const file = batch.queue.shift();
       logMsg("出队: " + file.name + "（剩余 " + batch.queue.length + " 个）");
+      batch.rateLimited = false;
       try {
         await processFile(file);
         batch.done++;
         logMsg("完成 " + batch.done + "/" + batch.total);
       } catch (e) {
         if (batch.stop) break;
+        // 限流：放回队首等 60s 重试，最多 5 次，避免整批作废
+        if (batch.rateLimited && (file.__retries || 0) < 5) {
+          file.__retries = (file.__retries || 0) + 1;
+          batch.queue.unshift(file);
+          const t = batch.tasks.find((t) => t.name === file.name && t.status === "处理中");
+          if (t) {
+            t.status = "等待";
+            renderTaskList();
+          }
+          logMsg("限流重试: " + file.name + " 放回队首，60s 后第 " + file.__retries + " 次重试");
+          // 清理本次残留附件/草稿，防止下次注入叠加
+          try {
+            await ensureHomeInput(true);
+          } catch (e2) {
+            logMsg("限流清理异常: " + e2.message);
+          }
+          await waitFor(() => batch.stop, 60000);
+          continue;
+        }
         batch.failed++;
         batch.lastError = e.message + "（" + file.name + "）";
         const failedTask = batch.tasks.find((t) => t.status === "处理中");
@@ -1307,12 +1327,6 @@
     input.click();
   }
 
-  window.addEventListener("keydown", (e) => {
-    if (e.ctrlKey && e.shiftKey && (e.key === "u" || e.key === "U")) {
-      e.preventDefault();
-      pickBatchFiles();
-    }
-  });
   // 拦截 DeepSeek 附件按钮选中的文件：选多个 .md/.srt 时截住，不进 DeepSeek 附件区，直接批量处理。
   // 单文件走原流程（自动填空 + 手动发送），互不干扰。capture 阶段先于 React 监听。
   document.addEventListener(
