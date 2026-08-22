@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek SRT 上传助手 + YouTube 字幕下载
 // @namespace    http://tampermonkey.net/
-// @version      3.13
+// @version      3.15
 // @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt / .md 时自动填入提示词。批量处理 MD 文件（并发 2 自动排队）。YouTube 页面添加「下载字幕」按钮。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
@@ -18,19 +18,16 @@
 
   // === 配置 ===
   const DEFAULT_PROMPT = "通俗易懂总结，不用术语/破折号，用连贯/简单/简洁语言表达，突出要点";
-  const DEFAULT_DELAY = 3; // 批量发送间隔基准（秒），实际 基准~基准+2s 随机，防风控
   const STORAGE = {
     ENABLED: "srtAutoFill",
     MD: "mdAutoFill",
     PROMPT: "srtPrompt",
     NEWCHAT: "newChatAfterSend",
-    DELAY: "sendDelay",
   };
   let autoFillEnabled = GM_getValue(STORAGE.ENABLED, true);
   let mdAutoFillEnabled = GM_getValue(STORAGE.MD, false);
   let promptText = GM_getValue(STORAGE.PROMPT, DEFAULT_PROMPT);
   let newChatAfterSend = GM_getValue(STORAGE.NEWCHAT, false);
-  let sendDelaySec = GM_getValue(STORAGE.DELAY, DEFAULT_DELAY);
 
   // === 页面控制面板（仅 DeepSeek 页面）===
   function buildPanel() {
@@ -180,19 +177,6 @@
         GM_setValue(STORAGE.PROMPT, promptText);
       },
     );
-    // 发送间隔行（基准秒，实际基准~基准+2s 随机；批量防风控）。输入框直接输基准数字
-    const delayRow = inlineEditRow(
-      "发送间隔: ",
-      () => sendDelaySec + "~" + (sendDelaySec + 2) + "s 随机",
-      (v) => {
-        const n = parseInt(v, 10);
-        if (Number.isFinite(n) && n >= 0) {
-          sendDelaySec = n;
-          GM_setValue(STORAGE.DELAY, n);
-        }
-      },
-      () => String(sendDelaySec),
-    );
 
     const batchBtn = document.createElement("button");
     batchBtn.id = "ds-batch-btn";
@@ -264,7 +248,6 @@
       ),
     );
     body.appendChild(promptRow);
-    body.appendChild(delayRow);
     body.appendChild(batchBtn);
     setBatchBtnState();
 
@@ -482,6 +465,16 @@
     );
   }
 
+  // SPA 路由变化事件：DeepSeek 用 pushState 切页（popstate 不触发），patch 一下派发自定义事件
+  for (const m of ["pushState", "replaceState"]) {
+    const orig = history[m].bind(history);
+    history[m] = (...args) => {
+      const r = orig(...args);
+      window.dispatchEvent(new Event("ds:navigate"));
+      return r;
+    };
+  }
+
   let pendingFill = false;
   let watchingSend = false;
   // 批量预览激活时禁止自动填空（showBatchPreview 读取 f.name 会误触 File getter）
@@ -492,14 +485,11 @@
   function watchSendThenNewChat() {
     if (!newChatAfterSend || watchingSend) return;
     watchingSend = true;
-    logMsg("发送后新对话: 开始监听 URL");
-    let lastUrl = location.href;
-    const timer = setInterval(() => {
-      const url = location.href;
-      if (url === lastUrl) return;
-      lastUrl = url;
-      if (!/\/a\/chat\/s\//.test(url)) return; // 只认进入会话页
-      clearInterval(timer);
+    logMsg("发送后新对话: 开始监听路由");
+    const onNav = () => {
+      if (!/\/a\/chat\/s\//.test(location.href)) return; // 只认进入会话页
+      window.removeEventListener("ds:navigate", onNav);
+      window.removeEventListener("popstate", onNav);
       watchingSend = false;
       // 防抖：等路由稳定、DOM 重建完成再触发
       setTimeout(() => {
@@ -512,7 +502,9 @@
           shortcutNewChat();
         }
       }, 300);
-    }, 300);
+    };
+    window.addEventListener("ds:navigate", onNav);
+    window.addEventListener("popstate", onNav); // 浏览器前进/后退兜底
   }
 
   // 自动填空：等输入框渲染出来；已有内容则不覆盖。批量期间（预览/运行）禁用，processFile 自己填空
@@ -582,6 +574,28 @@
         if (Date.now() - start > timeoutMs) return resolve(false);
         setTimeout(poll, 500);
       })();
+    });
+  }
+
+  // 发送确认：粘性标志 batch.sent + 一次性推送（XHR 钩子发 completion 时通知），避免轮询
+  let sentWaiters = [];
+  function notifySent() {
+    const ws = sentWaiters;
+    sentWaiters = [];
+    ws.forEach((r) => r());
+  }
+  function waitSent(timeoutMs) {
+    if (batch.sent) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const w = () => {
+        clearTimeout(tid);
+        resolve(true);
+      };
+      const tid = setTimeout(() => {
+        sentWaiters = sentWaiters.filter((x) => x !== w);
+        resolve(false);
+      }, timeoutMs);
+      sentWaiters.push(w);
     });
   }
 
@@ -918,10 +932,10 @@
       if (btn) {
         logMsg("点击发送按钮");
         btn.click();
-        const ok = await waitFor(
-          () => batch.sent || /\/a\/chat\/s\//.test(location.href) || batch.stop,
-          2000,
-        );
+        const ok = await Promise.race([
+          waitSent(2000),
+          waitFor(() => /\/a\/chat\/s\//.test(location.href) || batch.stop, 2000),
+        ]);
         if (ok || batch.stop) return !batch.stop;
       } else {
         logMsg("未找到发送按钮");
@@ -938,7 +952,10 @@
             cancelable: true,
           }),
         );
-        const ok = await waitFor(() => batch.sent || /\/a\/chat\/s\//.test(location.href), 2500);
+        const ok = await Promise.race([
+          waitSent(2500),
+          waitFor(() => /\/a\/chat\/s\//.test(location.href), 2500),
+        ]);
         if (ok) return true;
       }
       logMsg(
@@ -1013,7 +1030,10 @@
     }
 
     await sendAndConfirm();
-    const sent = await waitFor(() => batch.sent || /\/a\/chat\/s\//.test(location.href), 7000);
+    const sent = await Promise.race([
+      waitSent(7000),
+      waitFor(() => /\/a\/chat\/s\//.test(location.href), 7000),
+    ]);
     if (!sent) throw new Error("发送未确认（无 completion 请求）");
     if (task) {
       task.status = "生成中";
@@ -1241,12 +1261,6 @@
         await processFile(file);
         batch.done++;
         logMsg("完成 " + batch.done + "/" + batch.total);
-        // 发送间隔节流：每处理完一个文件随机等 基准~基准+2s 再继续，防风控封禁
-        if (!batch.stop && batch.queue.length && sendDelaySec > 0) {
-          const waitMs = sendDelaySec * 1000 + Math.random() * 2000;
-          logMsg("发送间隔等待 " + Math.round(waitMs / 1000) + "s…");
-          await new Promise((r) => setTimeout(r, waitMs));
-        }
       } catch (e) {
         if (batch.stop) break;
         batch.failed++;
@@ -1364,6 +1378,7 @@
           // completion 请求发出 = 消息已成功发送（比 URL 跳转更可靠）
           if (url.includes("/api/v0/chat/completion") && batch.running) {
             batch.sent = true;
+            notifySent();
             logMsg("completion 请求已发出");
           }
           this.addEventListener("load", () => {
