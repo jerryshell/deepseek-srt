@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek SRT 上传助手 + YouTube 字幕下载
 // @namespace    http://tampermonkey.net/
-// @version      3.12
+// @version      3.13
 // @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt / .md 时自动填入提示词。批量处理 MD 文件（并发 2 自动排队）。YouTube 页面添加「下载字幕」按钮。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
@@ -562,12 +562,10 @@
     queue: [],
     stop: false,
     fileReady: false,
-    fileReadyDom: false,
     uploadId: "",
     currentFileName: "",
     sent: false,
     lastError: "",
-    errors: [],
     tasks: [],
     pendingFiles: null,
     logs: [],
@@ -652,11 +650,9 @@
               .replace(/\s+/g, " ")
               .slice(0, 300),
         );
-        const norm = (s) =>
-          String(s || "")
-            .replace(/\s+/g, " ")
-            .trim();
-        const f = files.find((f) => norm(f.file_name || f.name) === norm(batch.currentFileName));
+        const f = files.find(
+          (f) => normName(f.file_name || f.name) === normName(batch.currentFileName),
+        );
         if (f?.status === "SUCCESS") {
           logMsg("XHR fetch_files: SUCCESS");
           batch.fileReady = true;
@@ -754,10 +750,6 @@
     String(s || "")
       .replace(/\s+/g, " ")
       .trim();
-  const shortName = (s) =>
-    normName(s)
-      .replace(/\.(md|srt|txt)$/i, "")
-      .slice(0, 25);
 
   // 上传就绪：等 fetch_files SUCCESS（XHR 拦截或主动轮询）。
   // DOM chip 只说明 DeepSeek 已接收文件，不代表就绪（服务器繁忙时延后），发送才不会被吞。
@@ -874,59 +866,6 @@
         stop = pollFileStatus(name, waiter);
       }, 2000);
     });
-  }
-
-  // 上传完成信号：fetch_files SUCCESS 或附件 chip 出现（兜底）。
-  // MutationObserver 观察 body（React 可能重建输入框容器），只检查新增/变更节点文本。返回 observer 供调用方清理。
-  function watchFileAppear(name) {
-    const input = findInput();
-    if (!input) {
-      logMsg("watchFileAppear: 未找到输入框，跳过 DOM 监听");
-      return null;
-    }
-    const needle = shortName(name); // 放宽匹配：chip 显示可能截断文件名
-    const inPanel = (el) => el && el.nodeType === 1 && !!el.closest?.("#ds-panel");
-    const check = () => {
-      let el = input.parentElement;
-      // 只查输入框附近的附件区（最多 8 层，不含 body——避免面板任务列表里的文件名误匹配）
-      for (let i = 0; i < 8 && el && el !== document.body; i++) {
-        if (inPanel(el)) break;
-        if (el.innerText?.includes(needle)) return true;
-        el = el.parentElement;
-      }
-      return false;
-    };
-    if (check()) {
-      logMsg("附件区已见文件名（初始检查）");
-      batch.fileReadyDom = true; // 仅标记：发送仍等 fetch_files SUCCESS（服务器繁忙时 chip 早于就绪）
-      return null;
-    }
-    const mo = new MutationObserver((mutations) => {
-      for (const m of mutations) {
-        if (m.type === "characterData") {
-          if (inPanel(m.target)) continue;
-          if (m.target.textContent?.includes(needle)) {
-            logMsg("附件区已见文件名（DOM 变更）");
-            batch.fileReadyDom = true;
-            mo.disconnect();
-            return;
-          }
-        }
-        for (const node of m.addedNodes) {
-          if (inPanel(node)) continue;
-          const t =
-            node.nodeType === 3 ? node.textContent : node.nodeType === 1 ? node.innerText : "";
-          if (t?.includes(needle)) {
-            logMsg("附件区已见文件名（DOM 变更）");
-            batch.fileReadyDom = true;
-            mo.disconnect();
-            return;
-          }
-        }
-      }
-    });
-    mo.observe(document.body, { childList: true, subtree: true, characterData: true });
-    return mo;
   }
 
   // 注入文件到 DeepSeek 隐藏 input 并触发 change（与拖入效果一致）
@@ -1053,12 +992,9 @@
     batch.currentFileName = file.name;
     if (!injectFile(file)) throw new Error("未找到文件输入框");
     batch.fileReady = false;
-    batch.fileReadyDom = false;
     batch.uploadId = "";
     logMsg("等待上传就绪: " + file.name);
-    const mo = watchFileAppear(file.name);
     const ready = await waitFileReady(file.name, 30000);
-    if (mo) mo.disconnect();
     if (batch.stop) throw new Error("已停止");
     if (!ready) {
       logMsg("上传超时: " + file.name);
@@ -1274,7 +1210,6 @@
     batch.total = files.length;
     batch.done = 0;
     batch.failed = 0;
-    batch.errors = [];
     batch.logs = [];
     const logBox = document.getElementById("ds-log");
     if (logBox) logBox.innerHTML = "";
@@ -1316,7 +1251,6 @@
         if (batch.stop) break;
         batch.failed++;
         batch.lastError = e.message + "（" + file.name + "）";
-        batch.errors.push({ file: file.name, msg: e.message });
         const failedTask = batch.tasks.find((t) => t.status === "处理中");
         if (failedTask) {
           failedTask.status = "失败";
@@ -1362,11 +1296,7 @@
   window.addEventListener("keydown", (e) => {
     if (e.ctrlKey && e.shiftKey && (e.key === "u" || e.key === "U")) {
       e.preventDefault();
-      try {
-        pickBatchFiles();
-      } catch {
-        panelNotice("文件选择器需从面板按钮触发", true);
-      }
+      pickBatchFiles();
     }
   });
   // 拦截 DeepSeek 附件按钮选中的文件：选多个 .md/.srt 时截住，不进 DeepSeek 附件区，直接批量处理。
@@ -1565,6 +1495,27 @@
     }
   }
 
+  // 开字幕触发 YT 自己的 timedtext 请求，复用其完整 URL（含 pot）下载；成功返回 true
+  async function tryCachedTimedtext(videoId, closeAfter, title) {
+    await ensureSubtitlesOn();
+    const u = await waitForTimedtextUrl(videoId);
+    if (!u) {
+      logMsg("YT timedtext 6s 内未捕获");
+      return false;
+    }
+    try {
+      const r = await fetch(u);
+      if (!r.ok) return false;
+      const events = JSON.parse(await r.text()).events || [];
+      if (events.length > 0) {
+        logMsg("YT timedtext 缓存路径: " + events.length + " 条字幕事件");
+        finishDownload(events, closeAfter, title);
+        return true;
+      }
+    } catch {}
+    return false;
+  }
+
   async function onDownload(button, closeAfter) {
     button.disabled = true;
     button.textContent = "获取中...";
@@ -1574,22 +1525,8 @@
         // SPA 切换视频后 ytInitialPlayerResponse 不更新 → 降级：
         // 触发字幕，复用 YT 自己的 timedtext 请求 URL（含 pot），不需要播放器数据
         logMsg("YT 下载: 播放器数据过期（SPA 切换），改用 timedtext 缓存路径");
-        await ensureSubtitlesOn();
-        const u = await waitForTimedtextUrl(getYoutubeVideoId());
-        if (u) {
-          const r = await fetch(u);
-          if (r.ok) {
-            const text = await r.text();
-            try {
-              const events = JSON.parse(text).events || [];
-              if (events.length > 0) {
-                logMsg("YT 降级路径: " + events.length + " 条字幕事件");
-                finishDownload(events, closeAfter);
-                return;
-              }
-            } catch {}
-          }
-        }
+        if (await tryCachedTimedtext(getYoutubeVideoId(), closeAfter)) return;
+        logMsg("YT 下载: 未获取到播放器数据（无 timedtext 缓存）");
         logMsg("YT 下载: 未获取到播放器数据（无 timedtext 缓存）");
         alert("未获取到播放器数据，请刷新页面后重试");
         return;
@@ -1625,27 +1562,16 @@
       // 直接复用 YT 正在用的完整 URL（含 pot 和全部参数），比拼接 pot 可靠
       if (response.ok && !text.trim()) {
         logMsg("YT 字幕接口返回空，尝试开启字幕获取 pot token 版 URL");
-        await ensureSubtitlesOn();
-        const timedtextUrl = await waitForTimedtextUrl(playerResponse?.videoDetails?.videoId);
-        if (timedtextUrl) {
-          logMsg("YT timedtext 缓存命中（含 pot token）");
-          const cachedResponse = await fetch(timedtextUrl);
-          if (cachedResponse.ok) {
-            const cachedText = await cachedResponse.text();
-            try {
-              const cachedEvents = JSON.parse(cachedText).events || [];
-              if (cachedEvents.length > 0) {
-                logMsg("YT 缓存字幕解析: " + cachedEvents.length + " 条事件");
-                finishDownload(cachedEvents, closeAfter, playerResponse?.videoDetails?.title);
-                return;
-              }
-            } catch {
-              logMsg("YT 缓存 URL 非 JSON，落回常规路径");
-            }
-          }
-        } else {
-          logMsg("YT timedtext 6s 内未捕获，回退常规路径");
+        if (
+          await tryCachedTimedtext(
+            playerResponse?.videoDetails?.videoId,
+            closeAfter,
+            playerResponse?.videoDetails?.title,
+          )
+        ) {
+          return;
         }
+        logMsg("YT timedtext 缓存未命中，回退常规路径");
       }
 
       if (!response.ok) {
@@ -1722,9 +1648,7 @@
       " | 发送后新对话: " +
       newChatAfterSend +
       " | XHR 钩子: " +
-      !!unsafeWindow.XMLHttpRequest +
-      " | FormData 钩子: " +
-      true,
+      !!unsafeWindow.XMLHttpRequest,
   );
   // 面板首次构建（状态刷新已并入 logMsg）
   if (location.hostname === "chat.deepseek.com") buildPanel();
