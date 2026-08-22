@@ -17,7 +17,7 @@
   "use strict";
 
   // === 配置 ===
-  const DEFAULT_PROMPT = "通俗易懂总结，不用术语/破折号，用连贯/简单/简洁语言表达";
+  const DEFAULT_PROMPT = "通俗易懂总结，不用术语/破折号，用连贯/简单/简洁语言表达，突出要点";
   const DEFAULT_DELAY = 3; // 批量发送间隔基准（秒），实际 基准~基准+2s 随机，防风控
   const STORAGE = {
     ENABLED: "srtAutoFill",
