@@ -17,7 +17,8 @@
   "use strict";
 
   // === 配置 ===
-  const DEFAULT_PROMPT = "通俗易懂总结，不用术语/破折号，用连贯/简单/简洁语言表达，突出要点";
+  const DEFAULT_PROMPT =
+    "通俗易懂总结，突出要点，用连贯简洁语言表达，禁止术语、破折号，然后给出客观评价，最后给出实操、落地指南，避免假大空";
   const STORAGE = {
     ENABLED: "srtAutoFill",
     MD: "mdAutoFill",
