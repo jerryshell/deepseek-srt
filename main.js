@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek SRT 上传助手 + YouTube 字幕下载
 // @namespace    http://tampermonkey.net/
-// @version      3.17
+// @version      3.18
 // @description  在 DeepSeek 上传 .srt 字幕（自动伪装为 .txt）、按提示词批量总结 MD/SRT（并发 2），并在 YouTube 页面添加「下载字幕」按钮。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
@@ -31,89 +31,271 @@
   let newChatAfterSend = GM_getValue(STORAGE.NEWCHAT, false);
 
   // === 页面控制面板（仅 DeepSeek 页面）===
+  // 视觉层统一收在 UI_CSS：状态用 data-* 驱动，间距与颜色只在这里定义。
+  // 面板在 DeepSeek 页，字幕轨道浮层与下载按钮在 YouTube 页，故按需注入。
+  const UI_CSS = `
+#ds-panel{
+  position:fixed;right:calc(12px + env(safe-area-inset-right,0px));top:64px;z-index:2147483000;
+  display:flex;align-items:center;justify-content:center;overflow:hidden;border-radius:16px;
+  font-size:12px;line-height:1.5;color:#fff;user-select:none;-webkit-font-smoothing:antialiased;
+  --gap:8px;--gutter:12px;
+}
+#ds-panel,#ds-panel *{box-sizing:border-box;}
+/* 折叠态：实心主色按钮 */
+/* 折叠态：实心主色按钮 */
+.ds-dot{color:#f87171;}
+#ds-panel[data-open="0"]{
+  width:48px;height:48px;padding:0;font-weight:700;cursor:pointer;background:#4560f0;
+  box-shadow:0 1px 2px rgba(0,0,0,.32),0 4px 12px rgba(0,0,0,.26);
+}
+#ds-panel[data-open="0"]:hover{filter:brightness(1.12);}
+#ds-panel[data-open="0"]:active{transform:scale(.96);}
+#ds-panel[data-open="0"]:focus-visible{outline:2px solid #93b0ff;outline-offset:2px;}
+#ds-panel[data-open="0"] #ds-body{display:none;}
+/* 展开态：分层阴影表达浮层高度，顶部高光代替描边 */
+/* 节奏：块间 gap，面板边缘与横向 gutter；两者只在这里定义 */
+#ds-panel[data-open="1"]{
+  display:block;width:280px;padding:0 0 var(--gutter);background:rgba(17,17,22,.96);
+  box-shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.3),0 24px 48px rgba(0,0,0,.24),
+    inset 0 1px 0 rgba(255,255,255,.07);
+}
+#ds-panel[data-open="1"] #ds-title{
+  display:flex;align-items:center;justify-content:space-between;gap:var(--gutter);
+  padding:var(--gutter) var(--gutter) var(--gap);margin-bottom:var(--gap);
+  font-weight:600;cursor:pointer;border-bottom:1px solid rgba(255,255,255,.1);
+}
+#ds-panel[data-open="1"] #ds-title:hover{background:rgba(255,255,255,.05);}
+#ds-panel[data-open="1"] #ds-title span:last-child{color:#a1a1aa;font-size:15px;line-height:1;}
+/* 设置行：整行可点，最小 36px 触达 */
+#ds-panel .ds-row{
+  display:flex;align-items:center;justify-content:space-between;gap:var(--gap);width:100%;
+  min-height:36px;padding:7px var(--gutter);margin:0;border:0;background:none;font:inherit;
+  color:#e4e4e7;text-align:left;cursor:pointer;
+}
+#ds-panel .ds-row:hover{background:rgba(255,255,255,.05);}
+#ds-panel .ds-row:active{background:rgba(255,255,255,.09);}
+#ds-panel .ds-row:focus-visible,#ds-panel .ds-row :focus-visible{
+  outline:2px solid #93b0ff;outline-offset:-2px;border-radius:8px;
+}
+/* 滑动开关：位移走 transform，避免逐帧布局 */
+#ds-panel .ds-switch{
+  position:relative;flex-shrink:0;width:28px;height:16px;border-radius:999px;background:#5f5f68;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.16);transition:background-color .15s ease-out;
+}
+#ds-panel .ds-switch::after{
+  content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;
+  background:#d4d4d8;transition:transform .15s ease-out,background-color .15s ease-out;
+}
+#ds-panel .ds-switch[data-on="1"]{background:#4560f0;box-shadow:none;}
+#ds-panel .ds-switch[data-on="1"]::after{transform:translateX(12px);background:#fff;}
+#ds-panel .ds-edit{
+  flex:1;min-width:0;padding:0;border:0;background:none;font:inherit;color:inherit;
+  text-align:left;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+#ds-panel .ds-hint{flex-shrink:0;font-size:11px;color:#8b8b96;}
+#ds-panel .ds-input{
+  flex:1;min-width:0;padding:5px 8px;background:#0b0b10;color:#fff;border:1px solid #4560f0;
+  border-radius:6px;font:inherit;outline:none;user-select:text;
+}
+#ds-panel .ds-link{
+  padding:3px 6px;border:0;border-radius:6px;background:none;font:inherit;font-size:11px;
+  color:#a1a1aa;cursor:pointer;
+}
+#ds-panel .ds-link:hover{background:rgba(255,255,255,.1);color:#e4e4e7;}
+#ds-panel .ds-link:focus-visible{outline:2px solid #93b0ff;outline-offset:1px;}
+#ds-batch-btn{
+  display:block;width:calc(100% - 2 * var(--gutter));margin:var(--gap) var(--gutter);
+  padding:9px 0;border:0;border-radius:8px;background:#4560f0;color:#fff;font:inherit;
+  font-weight:600;cursor:pointer;
+}
+#ds-batch-btn[data-mode="stop"]{background:#ef4444;}
+#ds-batch-btn:hover{filter:brightness(1.12);}
+#ds-batch-btn:active{transform:scale(.985);}
+#ds-batch-btn:focus-visible{outline:2px solid #93b0ff;outline-offset:2px;}
+/* 任务列表：分隔线与标题、状态行同一处理，行文字仍对齐 gutter */
+#ds-taskhead{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 var(--gutter) 4px;font-weight:600;
+}
+#ds-tasklist{
+  max-height:150px;overflow-y:auto;padding:0 var(--gutter);
+  border-top:1px solid rgba(255,255,255,.08);font-size:11px;line-height:1.6;
+  font-variant-numeric:tabular-nums;scrollbar-width:thin;
+}
+#ds-tasklist .ds-task{
+  padding:4px 0;border-bottom:1px solid rgba(255,255,255,.06);color:#a1a1aa;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+#ds-tasklist .ds-task:last-child{border-bottom:0;}
+#ds-tasklist .is-done{color:#4ade80;}
+#ds-tasklist .is-fail{color:#f87171;}
+#ds-tasklist .is-run{color:#fbbf24;}
+#ds-tasklist .is-work{color:#60a5fa;}
+/* 状态 / 进度 / 提示 */
+#ds-status{
+  padding:var(--gap) var(--gutter) 0;border-top:1px solid rgba(255,255,255,.1);font-size:11px;
+  line-height:1.5;color:#a1a1aa;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;
+  user-select:text;
+}
+#ds-progress{
+  margin:var(--gap) var(--gutter) 0;height:4px;border-radius:999px;
+  background:rgba(255,255,255,.12);overflow:hidden;
+}
+#ds-progress > div{width:0;height:100%;background:#4560f0;border-radius:inherit;}
+#ds-notice{
+  padding:var(--gap) var(--gutter) 0;font-size:11px;line-height:1.4;min-height:1.2em;
+  color:#a1a1aa;overflow-wrap:anywhere;user-select:text;
+}
+#ds-notice[data-error="1"]{color:#f87171;}
+/* 运行日志 */
+#ds-loghead{
+  display:flex;align-items:center;justify-content:space-between;gap:var(--gap);
+  padding:var(--gap) var(--gutter) 0;
+}
+#ds-logtitle{
+  flex:1;padding:2px 0;border:0;background:none;font:inherit;font-size:11px;color:#a1a1aa;
+  text-align:left;cursor:pointer;
+}
+#ds-logtitle:hover{color:#e4e4e7;}
+#ds-logtitle:focus-visible,#ds-copy:focus-visible{outline:2px solid #93b0ff;outline-offset:1px;}
+#ds-log{
+  padding:var(--gap) var(--gutter) 0;max-height:130px;overflow-y:auto;
+  font-size:11px;line-height:1.55;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color:#a1a1aa;overflow-wrap:anywhere;user-select:text;scrollbar-width:thin;
+}
+/* 字幕轨道浮层（仅 YouTube 页） */
+.ds-overlay,.ds-overlay *{box-sizing:border-box;}
+.ds-overlay{
+  position:fixed;inset:0;z-index:2147483001;display:flex;align-items:center;justify-content:center;
+  padding:16px;background:rgba(0,0,0,.5);
+}
+.ds-dialog{
+  width:min(440px,100%);max-height:75vh;display:flex;flex-direction:column;padding:16px;
+  border-radius:16px;background:#18181b;color:#fff;font-size:12px;box-shadow:0 8px 40px rgba(0,0,0,.45);
+}
+.ds-dialog .ds-dialog-title{padding-bottom:12px;border-bottom:1px solid rgba(255,255,255,.12);font-weight:600;}
+.ds-dialog .ds-select{
+  width:100%;margin-top:12px;padding:8px;border:1px solid #52525b;border-radius:8px;
+  background:#0b0b10;color:#e4e4e7;font:inherit;
+}
+.ds-dialog .ds-select:focus-visible{outline:2px solid #93b0ff;outline-offset:1px;}
+.ds-dialog .ds-dialog-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px;}
+.ds-dialog .ds-btn{
+  padding:8px 16px;border:0;border-radius:8px;background:#3f3f46;color:#e4e4e7;font:inherit;
+  font-weight:600;cursor:pointer;
+}
+.ds-dialog .ds-btn:hover{filter:brightness(1.18);}
+.ds-dialog .ds-btn:active{transform:scale(.97);}
+.ds-dialog .ds-btn:focus-visible{outline:2px solid #93b0ff;outline-offset:2px;}
+.ds-dialog .ds-btn[data-primary="1"]{background:#4560f0;color:#fff;}
+/* YouTube 下载按钮 */
+#yt-srt-wrap{position:absolute;top:0;right:0;display:flex;gap:8px;z-index:10;}
+.yt-srt-btn{
+  flex-shrink:0;padding:7px 14px;border:0;border-radius:999px;background:#065fd4;color:#fff;
+  font:inherit;font-size:13px;font-weight:500;white-space:nowrap;cursor:pointer;
+}
+.yt-srt-btn:hover{filter:brightness(1.12);}
+.yt-srt-btn:active{transform:scale(.96);}
+.yt-srt-btn:focus-visible{outline:2px solid #3ea6ff;outline-offset:2px;}
+.yt-srt-btn[disabled]{opacity:.6;cursor:default;}
+@media (prefers-reduced-motion:reduce){
+  #ds-panel,#ds-panel *,.ds-overlay,.ds-dialog .ds-btn,.yt-srt-btn{transition:none !important;}
+}
+`;
+
+  function ensureUiStyles() {
+    if (document.getElementById("ds-ui-style")) return;
+    const style = document.createElement("style");
+    style.id = "ds-ui-style";
+    style.textContent = UI_CSS;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  // 日志区展开/收起：logMsg 自动展开与点击标题共用，顺带同步 aria
+  function toggleLogBox(show) {
+    const box = document.getElementById("ds-log");
+    const title = document.getElementById("ds-logtitle");
+    if (!box || !title) return;
+    box.style.display = show ? "block" : "none";
+    title.textContent = show ? "运行日志 ▾" : "运行日志 ▸";
+    title.setAttribute("aria-expanded", String(show));
+  }
+
+  // 面板标题：展开态显示名称与收起符，折叠态显示缩写（运行中带红点）
+  function paintPanelTitle() {
+    const panel = document.getElementById("ds-panel");
+    const title = document.getElementById("ds-title");
+    if (!panel || !title) return;
+    title.innerHTML =
+      panel.dataset.open === "1"
+        ? "<span>SRT 助手</span><span>−</span>"
+        : batch.running
+          ? 'SRT <span class="ds-dot">●</span>'
+          : "SRT";
+  }
+
   function buildPanel() {
     if (location.hostname !== "chat.deepseek.com" || document.getElementById("ds-panel")) return;
+    ensureUiStyles();
     const panel = document.createElement("div");
     panel.id = "ds-panel";
-    panel.style.cssText =
-      "position:fixed;right:12px;top:64px;z-index:2147483000;font-size:12px;color:#fff;" +
-      "user-select:none;border-radius:14px;border:1px solid rgba(255,255,255,.08);" +
-      "display:flex;align-items:center;justify-content:center;";
-    // hover/运行态样式（内联样式写不了 :hover，注入一次样式表）
-    const dsStyle = document.createElement("style");
-    dsStyle.textContent =
-      '#ds-panel[data-open="0"]{cursor:pointer;}' +
-      '#ds-panel[data-open="0"]:hover{filter:brightness(1.15);}' +
-      "#ds-panel .ds-row:hover{background:rgba(255,255,255,.05);}" +
-      '#ds-panel[data-open="0"] #ds-title{font-weight:700;}' +
-      '#ds-panel[data-open="1"] #ds-title{font-weight:600;}' +
-      '#ds-panel[data-open="1"] #ds-title span:last-child{color:#71717a;font-size:15px;line-height:1;}' +
-      "#ds-batch-btn:hover{filter:brightness(1.12);}";
-    document.head.appendChild(dsStyle);
-
-    // 标题栏：默认折叠为渐变小按钮，点击展开/收起
+    panel.dataset.open = "0";
+    panel.tabIndex = 0;
+    // 标题栏：折叠为 48px 小按钮，点击展开/收起；键盘 Enter/Space 展开、Esc 收起
     const title = document.createElement("div");
     title.id = "ds-title";
-    title.style.cssText =
-      "display:flex;align-items:center;justify-content:space-between;padding:0;";
     const body = document.createElement("div");
     body.id = "ds-body";
     panel.appendChild(title);
     panel.appendChild(body);
     const apply = (open) => {
       panel.dataset.open = open ? "1" : "0";
-      panel.style.display = open ? "block" : "flex";
-      panel.style.width = open ? "280px" : "48px";
-      panel.style.height = open ? "auto" : "48px";
-      panel.style.padding = open ? "10px 0" : "0";
-      panel.style.background = open ? "rgba(17,17,22,.95)" : "#4d6bfe";
-      panel.style.boxShadow = open ? "0 4px 16px rgba(0,0,0,.35)" : "0 2px 8px rgba(0,0,0,.3)";
-      title.style.padding = open ? "0 12px 8px" : "0";
-      title.style.borderBottom = open ? "1px solid rgba(255,255,255,.1)" : "none";
-      title.style.marginBottom = open ? "4px" : "0";
-      title.innerHTML = open ? "<span>SRT 助手</span><span>−</span>" : "SRT";
-      body.style.display = open ? "" : "none";
+      panel.tabIndex = open ? -1 : 0; // 展开后焦点交给内部控件
+      // 折叠态整体是一个按钮（读屏报到名称与展开状态），展开后回归普通容器
+      if (open) {
+        panel.removeAttribute("role");
+        panel.removeAttribute("aria-expanded");
+      } else {
+        panel.setAttribute("role", "button");
+        panel.setAttribute("aria-expanded", "false");
+      }
+      paintPanelTitle();
     };
-    apply(false); // 默认折叠
     panel.expand = () => apply(true); // 供错误通知自动展开
     panel.addEventListener("click", () => {
-      if (body.style.display === "none") apply(true);
+      if (panel.dataset.open === "0") apply(true);
     });
     title.addEventListener("click", (e) => {
-      if (body.style.display !== "none") {
+      if (panel.dataset.open === "1") {
         e.stopPropagation();
         apply(false);
       }
     });
+    panel.addEventListener("keydown", (e) => {
+      const open = panel.dataset.open === "1";
+      if (e.key === "Escape" && open && !(e.target instanceof HTMLInputElement)) {
+        e.preventDefault();
+        apply(false);
+      } else if (!open && (e.key === "Enter" || e.key === " ")) {
+        e.preventDefault();
+        apply(true);
+      }
+    });
 
-    const rowStyle =
-      "display:flex;align-items:center;justify-content:space-between;" +
-      "padding:6px 8px;margin:1px 8px;border-radius:8px;cursor:pointer;";
-    const labelStyle = "color:#e4e4e7;";
-
+    // 开关行：真 button + role=switch，键盘 Space/Enter 白送，aria-checked 供读屏
     function toggleRow(label, key, get, set) {
-      const row = document.createElement("div");
+      const row = document.createElement("button");
+      row.type = "button";
       row.className = "ds-row";
-      row.style.cssText = rowStyle;
+      row.setAttribute("role", "switch");
       const span = document.createElement("span");
       span.textContent = label;
-      span.style.cssText = labelStyle;
-      // 滑动开关
       const state = document.createElement("span");
-      state.style.cssText =
-        "width:26px;height:14px;border-radius:7px;background:#3f3f46;position:relative;" +
-        "flex-shrink:0;";
-      const knob = document.createElement("span");
-      knob.style.cssText =
-        "position:absolute;top:2px;left:2px;width:10px;height:10px;border-radius:50%;" +
-        "background:#a1a1aa;";
-      state.appendChild(knob);
+      state.className = "ds-switch";
       const paint = () => {
-        state.style.background = get() ? "#4d6bfe" : "#3f3f46";
-        knob.style.left = get() ? "14px" : "2px";
-        knob.style.background = get() ? "#fff" : "#a1a1aa";
+        state.dataset.on = get() ? "1" : "0";
+        row.setAttribute("aria-checked", String(get()));
       };
-      paint();
       row.appendChild(span);
       row.appendChild(state);
       row.addEventListener("click", () => {
@@ -121,48 +303,52 @@
         GM_setValue(key, get());
         paint();
       });
+      paint();
       return row;
     }
 
-    // 行内编辑行：label + 编辑入口，点击换成输入框（回车/失焦保存）
+    // 行内编辑行：整行可点，点击换成输入框（回车/失焦保存，Esc 取消）
     function inlineEditRow(prefix, getText, onSave) {
       const row = document.createElement("div");
       row.className = "ds-row";
-      row.style.cssText = rowStyle;
-      const label = document.createElement("span");
-      label.style.cssText =
-        labelStyle +
-        "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
-      const paint = () => (label.textContent = prefix + getText());
+      const label = document.createElement("button");
+      label.type = "button";
+      label.className = "ds-edit";
+      const paint = () => {
+        label.textContent = prefix + getText();
+        label.title = prefix + getText(); // 截断时可悬停看全文
+      };
       paint();
-      const ic = document.createElement("span");
-      ic.textContent = "编辑";
-      ic.style.cssText = "color:#71717a;margin-left:6px;flex-shrink:0;";
+      const hint = document.createElement("span");
+      hint.className = "ds-hint";
+      hint.textContent = "编辑";
       row.appendChild(label);
-      row.appendChild(ic);
+      row.appendChild(hint);
       row.addEventListener("click", () => {
         const input = document.createElement("input");
         input.type = "text";
+        input.className = "ds-input";
         input.value = getText();
-        input.style.cssText =
-          "flex:1;min-width:0;background:#111;color:#fff;border:1px solid #4d6bfe;" +
-          "border-radius:6px;padding:3px 6px;font-size:11px;outline:none;";
         label.replaceWith(input);
         input.focus();
+        // 全选方便整体替换；再把滚动位置拉回开头，否则只能看到提示词结尾
         input.select();
-        const save = () => {
+        input.scrollLeft = 0;
+        // isConnected 去重：Esc 移除输入框后浏览器补发的 blur 不再提交
+        const finish = (commit) => {
+          if (!input.isConnected) return;
           const v = input.value.trim();
-          if (v) onSave(v);
+          if (commit && v) onSave(v);
           input.replaceWith(label);
           paint();
         };
-        input.addEventListener("blur", save);
+        input.addEventListener("blur", () => finish(true));
         input.addEventListener("keydown", (e) => {
           if (e.key === "Enter") {
             e.preventDefault();
-            save();
+            finish(true);
           }
-          if (e.key === "Escape") input.replaceWith(label);
+          if (e.key === "Escape") finish(false);
         });
       });
       return row;
@@ -179,11 +365,9 @@
     );
 
     const batchBtn = document.createElement("button");
+    batchBtn.type = "button";
     batchBtn.id = "ds-batch-btn";
     batchBtn.textContent = "批量上传 MD/SRT";
-    batchBtn.style.cssText =
-      "width:calc(100% - 24px);margin:6px 12px 2px;padding:8px 0;border:none;border-radius:8px;" +
-      "background:#4d6bfe;color:#fff;font-size:12px;font-weight:600;cursor:pointer;";
     batchBtn.addEventListener("click", () => {
       if (batch.running) {
         stopBatch();
@@ -201,24 +385,20 @@
     // 任务列表区（选文件后展示，可逐项看状态）
     const taskBox = document.createElement("div");
     taskBox.id = "ds-taskbox";
-    taskBox.style.cssText = "display:none;margin:4px 12px 0;";
+    taskBox.style.display = "none";
     const taskHead = document.createElement("div");
-    taskHead.style.cssText =
-      "display:flex;align-items:center;justify-content:space-between;" +
-      "padding:2px 0 4px;font-weight:600;";
+    taskHead.id = "ds-taskhead";
     const taskTitle = document.createElement("span");
     taskTitle.textContent = "任务";
-    const clearLink = document.createElement("span");
+    const clearLink = document.createElement("button");
+    clearLink.type = "button";
+    clearLink.className = "ds-link";
     clearLink.textContent = "清空";
-    clearLink.style.cssText = "cursor:pointer;color:#a1a1aa;font-weight:400;font-size:11px;";
     clearLink.addEventListener("click", clearTasks);
     taskHead.appendChild(taskTitle);
     taskHead.appendChild(clearLink);
     const taskList = document.createElement("div");
     taskList.id = "ds-tasklist";
-    taskList.style.cssText =
-      "max-height:150px;overflow-y:auto;font-size:11px;line-height:1.5;" +
-      "border-top:1px solid rgba(255,255,255,.08);";
     taskBox.appendChild(taskHead);
     taskBox.appendChild(taskList);
 
@@ -253,42 +433,34 @@
 
     const statusRow = document.createElement("div");
     statusRow.id = "ds-status";
-    statusRow.style.cssText =
-      "margin:8px 12px 0;padding-top:8px;border-top:1px solid rgba(255,255,255,.12);" +
-      "color:#a1a1aa;font-size:11px;line-height:1.5;";
     statusRow.textContent = getStatusText();
     body.appendChild(statusRow);
 
     // 进度条（运行中显示）
     const progress = document.createElement("div");
     progress.id = "ds-progress";
-    progress.style.cssText =
-      "margin:4px 12px 0;height:3px;border-radius:2px;background:#27272a;overflow:hidden;display:none;";
+    progress.style.display = "none";
     const bar = document.createElement("div");
-    bar.style.cssText = "height:100%;width:0;background:#4d6bfe;";
     progress.appendChild(bar);
     body.appendChild(progress);
 
     const notice = document.createElement("div");
     notice.id = "ds-notice";
-    notice.style.cssText =
-      "margin:6px 12px 0;color:#a1a1aa;font-size:11px;line-height:1.4;min-height:1.2em;word-break:break-all;";
     body.appendChild(notice);
 
     // 日志区：默认收起，点击标题展开；运行中自动展开
     const logHead = document.createElement("div");
-    logHead.style.cssText =
-      "display:flex;align-items:center;justify-content:space-between;margin:6px 12px 0;" +
-      "cursor:pointer;font-size:11px;color:#a1a1aa;";
-    const logTitle = document.createElement("span");
+    logHead.id = "ds-loghead";
+    const logTitle = document.createElement("button");
+    logTitle.type = "button";
+    logTitle.id = "ds-logtitle";
     logTitle.textContent = "运行日志 ▸";
     const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.id = "ds-copy";
+    copyBtn.className = "ds-link";
     copyBtn.textContent = "复制日志";
-    copyBtn.style.cssText =
-      "padding:2px 8px;background:#3f3f46;color:#e4e4e7;border:none;border-radius:6px;" +
-      "cursor:pointer;font-size:10px;";
-    copyBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
+    copyBtn.addEventListener("click", () => {
       const text = batch.logs.join("\n") || "（无日志）";
       navigator.clipboard.writeText(text).then(() => {
         const prev = copyBtn.textContent;
@@ -300,29 +472,24 @@
     logHead.appendChild(copyBtn);
     const logBox = document.createElement("div");
     logBox.id = "ds-log";
-    logBox.style.cssText =
-      "display:none;margin:4px 12px 10px;max-height:130px;overflow-y:auto;font-family:monospace;" +
-      "font-size:10px;color:#71717a;line-height:1.5;user-select:text;word-break:break-all;";
+    logBox.style.display = "none";
     body.appendChild(logHead);
     body.appendChild(logBox);
-    const toggleLog = (show) => {
-      logBox.style.display = show ? "block" : "none";
-      logTitle.textContent = show ? "运行日志 ▾" : "运行日志 ▸";
-    };
-    logHead.addEventListener("click", () => toggleLog(logBox.style.display === "none"));
+    toggleLogBox(false);
+    logTitle.addEventListener("click", () => toggleLogBox(logBox.style.display === "none"));
 
     document.body.appendChild(panel);
-    return statusRow;
+    apply(false); // 默认折叠
   }
 
   function panelNotice(text, isError) {
-    const panel = document.getElementById("ds-panel");
-    if (!panel) buildPanel();
-    if (isError) panel.expand?.(); // 错误时自动展开面板
+    if (!document.getElementById("ds-panel")) buildPanel();
+    // 重新取一次：buildPanel 可能刚建好面板
+    if (isError) document.getElementById("ds-panel")?.expand?.(); // 错误时自动展开面板
     const notice = document.getElementById("ds-notice");
     if (!notice) return;
     notice.textContent = text;
-    notice.style.color = isError ? "#f87171" : "#a1a1aa";
+    notice.dataset.error = isError ? "1" : "0";
     notice.dataset.ts = String(Date.now());
     setTimeout(() => {
       if (Date.now() - Number(notice.dataset.ts || 0) >= 3000) notice.textContent = "";
@@ -357,6 +524,8 @@
   const toTxt = (name) => name.replace(/\.srt$/i, ".txt");
   const origNameDesc = Object.getOwnPropertyDescriptor(File.prototype, "name");
   const origTypeDesc = Object.getOwnPropertyDescriptor(File.prototype, "type");
+  // 原始文件名：绕开下面伪装用的 name getter（.srt 会被读成 .txt）
+  const realName = (f) => (origNameDesc ? origNameDesc.get.call(f) : f.name);
 
   // .srt 触发自动填空并改名；.md 在开关开启时只填空
   if (origNameDesc) {
@@ -607,9 +776,7 @@
     const box = document.getElementById("ds-log");
     if (box) {
       // 运行中自动展开日志区
-      box.style.display = "block";
-      const head = box.previousElementSibling;
-      if (head?.firstChild) head.firstChild.textContent = "运行日志 ▾";
+      toggleLogBox(true);
       const row = document.createElement("div");
       row.textContent = "[" + ts + "] " + line;
       box.appendChild(row);
@@ -620,11 +787,8 @@
     if (panel) {
       const status = panel.querySelector("#ds-status");
       if (status) status.textContent = getStatusText();
-      // 折叠时小按钮显示运行红点
-      if (panel.dataset.open === "0") {
-        const t = panel.querySelector("#ds-title");
-        if (t) t.innerHTML = batch.running ? 'SRT <span style="color:#f87171">●</span>' : "SRT";
-      }
+      // 标题：折叠态显示运行红点，展开态显示名称
+      paintPanelTitle();
       const progress = panel.querySelector("#ds-progress");
       const bar = progress?.firstChild;
       if (progress && bar) {
@@ -993,7 +1157,7 @@
 
   async function processFile(origFile) {
     await ensureHomeInput();
-    logMsg("上传开始: " + origFile.name);
+    logMsg("上传开始: " + realName(origFile));
     const task = batch.tasks.find((t) => t.status === "等待");
     if (task) {
       task.status = "处理中";
@@ -1043,10 +1207,16 @@
   // 多轨道时下拉选择（不弹系统 prompt）
   function chooseTrack(tracks) {
     return new Promise((resolve) => {
+      ensureUiStyles();
+      const overlay = document.createElement("div");
+      overlay.className = "ds-overlay";
+      const box = document.createElement("div");
+      box.className = "ds-dialog";
+      const title = document.createElement("div");
+      title.className = "ds-dialog-title";
+      title.textContent = "选择字幕轨道";
       const select = document.createElement("select");
-      select.style.cssText =
-        "margin-top:10px;width:100%;background:#111;color:#e4e4e7;border:1px solid #3f3f46;" +
-        "border-radius:8px;padding:6px;font-size:12px;";
+      select.className = "ds-select";
       tracks.forEach((t, i) => {
         const opt = document.createElement("option");
         opt.value = String(i);
@@ -1058,72 +1228,58 @@
           (t.kind === "asr" ? " [自动]" : "");
         select.appendChild(opt);
       });
-      // 轨道选择浮层（内联，唯一调用者）
-      const overlay = document.createElement("div");
-      overlay.style.cssText =
-        "position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2147483001;" +
-        "display:flex;align-items:center;justify-content:center;";
-      const box = document.createElement("div");
-      box.style.cssText =
-        "background:#18181b;color:#fff;border-radius:12px;padding:16px;width:440px;" +
-        "max-height:75vh;display:flex;flex-direction:column;font-size:12px;" +
-        "box-shadow:0 8px 40px rgba(0,0,0,.5);";
-      const title = document.createElement("div");
-      title.textContent = "选择字幕轨道";
-      title.style.cssText =
-        "font-weight:600;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,.12);";
       const row = document.createElement("div");
-      row.style.cssText = "display:flex;gap:8px;justify-content:flex-end;margin-top:12px;";
+      row.className = "ds-dialog-actions";
+      // 关闭路径统一：Esc、点遮罩、两个按钮
+      const close = (track) => {
+        document.removeEventListener("keydown", onKey);
+        overlay.remove();
+        resolve(track);
+      };
+      function onKey(e) {
+        if (e.key === "Escape") close(null);
+      }
+      document.addEventListener("keydown", onKey);
+      overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) close(null);
+      });
       const mkBtn = (text, primary, onClick) => {
         const b = document.createElement("button");
+        b.type = "button";
+        b.className = "ds-btn";
+        if (primary) b.dataset.primary = "1";
         b.textContent = text;
-        b.style.cssText =
-          "padding:6px 16px;border:none;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;" +
-          (primary ? "background:#4d6bfe;color:#fff;" : "background:#3f3f46;color:#e4e4e7;");
         b.addEventListener("click", onClick);
         return b;
       };
-      row.appendChild(
-        mkBtn("取消", false, () => {
-          overlay.remove();
-          resolve(null);
-        }),
-      );
-      row.appendChild(
-        mkBtn("下载", true, () => {
-          overlay.remove();
-          resolve(tracks[Number(select.value)]);
-        }),
-      );
+      row.appendChild(mkBtn("取消", false, () => close(null)));
+      row.appendChild(mkBtn("下载", true, () => close(tracks[Number(select.value)])));
       box.appendChild(title);
       box.appendChild(select);
       box.appendChild(row);
       overlay.appendChild(box);
       document.body.appendChild(overlay);
+      select.focus();
     });
   }
 
   // === 任务列表（面板内）===
+  // 任务状态 → 颜色类（样式见 UI_CSS #ds-tasklist）
+  const TASK_STATUS_CLASS = {
+    完成: "is-done",
+    失败: "is-fail",
+    生成中: "is-run",
+    处理中: "is-work",
+  };
+
   function renderTaskList() {
     const list = document.getElementById("ds-tasklist");
     if (!list) return;
     list.innerHTML = "";
     batch.tasks.forEach((t, i) => {
       const row = document.createElement("div");
-      row.style.cssText =
-        "padding:3px 0;border-bottom:1px solid rgba(255,255,255,.06);white-space:nowrap;" +
-        "overflow:hidden;text-overflow:ellipsis;";
-      const color =
-        t.status === "完成"
-          ? "#4ade80"
-          : t.status === "失败"
-            ? "#f87171"
-            : t.status === "生成中"
-              ? "#fbbf24"
-              : t.status === "处理中"
-                ? "#60a5fa"
-                : "#a1a1aa";
-      row.style.color = color;
+      row.className =
+        "ds-task" + (TASK_STATUS_CLASS[t.status] ? " " + TASK_STATUS_CLASS[t.status] : "");
       row.textContent = i + 1 + ". " + t.name + (t.status === "等待" ? "" : "  " + t.status);
       list.appendChild(row);
     });
@@ -1135,10 +1291,10 @@
     if (batch.running) {
       btn.disabled = false;
       btn.textContent = "停止处理";
-      btn.style.background = "#ef4444";
+      btn.dataset.mode = "stop";
       return;
     }
-    btn.style.background = "#4d6bfe";
+    btn.dataset.mode = "run";
     if (batch.tasks.length && batch.pendingFiles?.length) {
       btn.textContent = "开始处理（" + batch.tasks.length + "）";
       return;
@@ -1176,7 +1332,7 @@
     batchPreviewActive = true;
     batch.pendingFiles = files;
     logMsg("预览 " + files.length + " 个文件");
-    batch.tasks = files.map((f) => ({ name: f.name, status: "等待" }));
+    batch.tasks = files.map((f) => ({ name: realName(f), status: "等待" }));
     const box = document.getElementById("ds-taskbox");
     if (box) box.style.display = "block";
     renderTaskList();
@@ -1254,7 +1410,7 @@
       await waitFor(() => countNewChatSessions() < MAX_CONCURRENT || batch.stop, 3600 * 1000);
       if (batch.stop) break;
       const file = batch.queue.shift();
-      logMsg("出队: " + file.name + "（剩余 " + batch.queue.length + " 个）");
+      logMsg("出队: " + realName(file) + "（剩余 " + batch.queue.length + " 个）");
       batch.rateLimited = false;
       try {
         await processFile(file);
@@ -1266,12 +1422,14 @@
         if (batch.rateLimited && (file.__retries || 0) < 5) {
           file.__retries = (file.__retries || 0) + 1;
           batch.queue.unshift(file);
-          const t = batch.tasks.find((t) => t.name === file.name && t.status === "处理中");
+          const t = batch.tasks.find((t) => t.name === realName(file) && t.status === "处理中");
           if (t) {
             t.status = "等待";
             renderTaskList();
           }
-          logMsg("限流重试: " + file.name + " 放回队首，60s 后第 " + file.__retries + " 次重试");
+          logMsg(
+            "限流重试: " + realName(file) + " 放回队首，60s 后第 " + file.__retries + " 次重试",
+          );
           // 清理本次残留附件/草稿，防止下次注入叠加
           try {
             await ensureHomeInput(true);
@@ -1335,9 +1493,10 @@
         return;
       const files = [...t.files];
       if (files.length < 2) return;
-      // 先锁批量预览再访问 f.name（getter 会触发自动填空，此时 showBatchPreview 还没跑）
+      // 先锁批量预览再访问文件名（getter 会触发自动填空，此时 showBatchPreview 还没跑）
       batchPreviewActive = true;
-      if (!files.every((f) => /(\.md|\.srt)$/i.test(f.name))) {
+      // 用原始名判扩展名：.srt 被伪装 getter 读成 .txt，直接用 f.name 会误判为非字幕
+      if (!files.every((f) => /(\.md|\.srt)$/i.test(realName(f)))) {
         batchPreviewActive = false;
         return;
       }
@@ -1636,12 +1795,9 @@
 
   function createDownloadButton(text, closeAfter) {
     const button = document.createElement("button");
+    button.type = "button";
+    button.className = "yt-srt-btn";
     button.textContent = text;
-    button.style.cssText =
-      "margin-left:0;flex-shrink:0;" +
-      "padding:6px 14px;border:none;border-radius:18px;" +
-      "background:#065fd4;color:#fff;font-size:13px;font-weight:500;" +
-      "cursor:pointer;white-space:nowrap;";
     button.addEventListener("click", () => onDownload(button, closeAfter));
     return button;
   }
@@ -1655,8 +1811,9 @@
     if (!fold) return;
     fold.style.position = "relative";
 
+    ensureUiStyles();
     const wrap = document.createElement("div");
-    wrap.style.cssText = "position:absolute;top:0;right:0;display:flex;gap:8px;z-index:10;";
+    wrap.id = "yt-srt-wrap";
     const btnDownload = createDownloadButton("下载字幕", false);
     btnDownload.id = "yt-srt-download-btn";
     wrap.appendChild(btnDownload);
