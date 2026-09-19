@@ -2,7 +2,7 @@
 // @name         DeepSeek SRT 上传助手 + YouTube 字幕下载
 // @namespace    http://tampermonkey.net/
 // @version      3.17
-// @description  允许在 DeepSeek 直接上传 .srt 字幕文件（自动伪装为 .txt）。可选拖入 .srt / .md 时自动填入提示词。批量处理 MD 文件（并发 2 自动排队）。YouTube 页面添加「下载字幕」按钮。
+// @description  在 DeepSeek 上传 .srt 字幕（自动伪装为 .txt）、按提示词批量总结 MD/SRT（并发 2），并在 YouTube 页面添加「下载字幕」按钮。
 // @author       Jerry
 // @match        https://chat.deepseek.com/*
 // @match        https://www.youtube.com/*
@@ -18,7 +18,7 @@
 
   // === 配置 ===
   const DEFAULT_PROMPT =
-    "通俗易懂总结，突出要点，禁止术语、破折号，然后给出客观评价，最后给出实操、落地指南，避免假大空";
+    "通俗易懂总结，要求突出要点，禁止术语，禁止破折号；给出评价，必须客观，禁止反驳性人格，禁止为了反对而反对；给出实操落地指南，禁止假大空；";
   const STORAGE = {
     ENABLED: "srtAutoFill",
     MD: "mdAutoFill",
@@ -124,9 +124,8 @@
       return row;
     }
 
-    // 行内编辑行：label + ✎，点击换成输入框（回车/失焦保存）。
-    // getText 是显示文案；getEdit（可选）是输入框里的可编辑值（如 label 显示「3~5s 随机」、输入框显示「3」）
-    function inlineEditRow(prefix, getText, onSave, getEdit) {
+    // 行内编辑行：label + 编辑入口，点击换成输入框（回车/失焦保存）
+    function inlineEditRow(prefix, getText, onSave) {
       const row = document.createElement("div");
       row.className = "ds-row";
       row.style.cssText = rowStyle;
@@ -137,14 +136,14 @@
       const paint = () => (label.textContent = prefix + getText());
       paint();
       const ic = document.createElement("span");
-      ic.textContent = "✎";
+      ic.textContent = "编辑";
       ic.style.cssText = "color:#71717a;margin-left:6px;flex-shrink:0;";
       row.appendChild(label);
       row.appendChild(ic);
       row.addEventListener("click", () => {
         const input = document.createElement("input");
         input.type = "text";
-        input.value = getEdit ? getEdit() : getText();
+        input.value = getText();
         input.style.cssText =
           "flex:1;min-width:0;background:#111;color:#fff;border:1px solid #4d6bfe;" +
           "border-radius:6px;padding:3px 6px;font-size:11px;outline:none;";
@@ -293,7 +292,7 @@
       const text = batch.logs.join("\n") || "（无日志）";
       navigator.clipboard.writeText(text).then(() => {
         const prev = copyBtn.textContent;
-        copyBtn.textContent = "已复制！";
+        copyBtn.textContent = "已复制";
         setTimeout(() => (copyBtn.textContent = prev), 1200);
       });
     });
@@ -352,10 +351,8 @@
     return ""; // 无任务时不显示状态
   }
 
-  // 面板状态刷新：并入 logMsg（batch 每次变化的必经点）
-
   // === 核心：把 .srt 伪装成 .txt（拦截 File.name/type + FormData 替换）===
-  // .srt 检测与改名抽成两个 helper，5 处调用点共用
+  // .srt 检测与改名，多处调用点共用
   const isSrt = (name) => /\.srt$/i.test(name);
   const toTxt = (name) => name.replace(/\.srt$/i, ".txt");
   const origNameDesc = Object.getOwnPropertyDescriptor(File.prototype, "name");
@@ -436,7 +433,7 @@
     return null;
   }
 
-  // 查找“开启新对话”按钮：DeepSeek 中它是一个 div+span，不是 button
+  // 查找「开启新对话」按钮：DeepSeek 中它是一个 div+span，不是 button
   function findNewChatButton() {
     const all = document.querySelectorAll("div[tabindex], button");
     for (const el of all) {
@@ -658,7 +655,7 @@
             " | 期望: " +
             batch.currentFileName,
         );
-        // 完整响应体（截断）——繁忙/拒绝时 biz_error 等信息在这里面
+        // 完整响应体（截断）：繁忙/拒绝时 biz_error 等信息在这里面
         logMsg(
           "fetch_files 响应: " +
             String(xhr.responseText || "")
@@ -694,7 +691,7 @@
           // 服务器限流：标记后由 runBatch 把当前文件放回队首，等待后重试（不直接停批）
           if (d?.data?.biz_code === 7 || /rate limit/i.test(String(d?.data?.biz_msg || ""))) {
             batch.rateLimited = true;
-            logMsg("触发 rate limit（服务器限流），该文件将延迟重试");
+            logMsg("触发服务器限流，该文件将延迟重试");
           }
           logMsg(
             "upload_file: " +
@@ -705,7 +702,7 @@
               (biz.name || "?") +
               ")",
           );
-          // 完整响应体（截断）——服务器繁忙时的错误信息在这里面
+          // 完整响应体（截断）：服务器繁忙时的错误信息在这里面
           logMsg(
             "upload_file 响应: " +
               String(xhr.responseText || "")
@@ -715,9 +712,9 @@
           const id = biz.id;
           if (id) {
             batch.uploadId = id;
-            logMsg("upload_file id: " + id.slice(0, 24) + "…");
+            logMsg("upload_file ID: " + id.slice(0, 24) + "…");
           } else {
-            logMsg("upload_file 响应无 id，可能失败");
+            logMsg("upload_file 响应无 ID，可能失败");
           }
           // 服务器直接回 SUCCESS（无需 PENDING→fetch_files 流程）时立即放行，
           // 否则前端可能不发 fetch_files，会一直等到超时
@@ -863,16 +860,16 @@
         subtree: true,
         characterData: true,
       });
-      // upload_file 10s 无 id（服务器繁忙/响应异常）→ 快速失败，不空等 30s
+      // upload_file 10s 无 ID（服务器繁忙/响应异常）→ 快速失败，不空等 30s
       setTimeout(() => {
         if (done) return;
         if (!batch.uploadId) {
-          logMsg("上传 10s 未拿到 uploadId，判定上传失败");
+          logMsg("上传 10s 未拿到 upload ID，判定上传失败");
           waiter(false);
         }
       }, 10000);
       timeoutId = setTimeout(() => {
-        logMsg("上传就绪等待超时，uploadId: " + (batch.uploadId || "空"));
+        logMsg("上传就绪等待超时，upload ID: " + (batch.uploadId || "空"));
         waiter(false);
       }, timeoutMs);
       // 先给 DeepSeek 前端 2s 发 fetch_files 的机会，未发则由主动轮询接管
@@ -996,7 +993,7 @@
 
   async function processFile(origFile) {
     await ensureHomeInput();
-    logMsg("== 上传开始: " + origFile.name);
+    logMsg("上传开始: " + origFile.name);
     const task = batch.tasks.find((t) => t.status === "等待");
     if (task) {
       task.status = "处理中";
@@ -1186,7 +1183,7 @@
     setBatchBtnState();
   }
 
-  let sidebarBaseline = 0;
+  let sidebarBaseline = 0; // 批量开始前的历史「新对话」会话数，不计入并发闸
   let lastNewChatCount = 0;
 
   function countNewChatSessions() {
@@ -1353,7 +1350,8 @@
     true,
   );
 
-  // === YouTube 字幕下载（仅 www.youtube.com 生效）===
+  // === 网络钩子（全站生效）===
+  // DeepSeek 靠它拿上传/发送信号，YouTube 靠它缓存带 pot 的 timedtext URL。
 
   // pot token 捕获：YT 播放字幕时自己请求 api/timedtext（带 pot），从 XHR 响应 URL 提取缓存
   const timedtextUrlCache = new Map(); // videoId -> 完整 timedtext URL（含 pot，YT 自己请求的）
@@ -1378,7 +1376,7 @@
       }
     }
 
-    // XHR
+    // XHR 钩子（DeepSeek 与 YouTube 共用）
     const xhrProto = unsafeWindow.XMLHttpRequest?.prototype;
     if (xhrProto) {
       const origOpen = xhrProto.open;
@@ -1410,8 +1408,10 @@
     }
   })();
 
+  // === YouTube 字幕下载（仅 www.youtube.com 生效）===
+
   // 播放器私有 API（getPlayerResponse）在沙箱不可用，改用 unsafeWindow 读页面全局。
-  // 注意：SPA 切换视频后 ytInitialPlayerResponse 可能过期，用 videoId 校验。
+  // SPA 切换视频后 ytInitialPlayerResponse 可能过期，用 videoId 字段校验。
   function getYoutubeVideoId() {
     return new URLSearchParams(location.search).get("v");
   }
@@ -1420,7 +1420,6 @@
     const pr = unsafeWindow.ytInitialPlayerResponse;
     if (!pr?.videoDetails) return null;
     const videoId = getYoutubeVideoId();
-    // SPA 切换视频后此变量可能是旧数据，校验 videoId
     if (videoId && pr.videoDetails.videoId !== videoId) return null;
     return pr;
   }
@@ -1548,7 +1547,7 @@
 
   async function onDownload(button, closeAfter) {
     button.disabled = true;
-    button.textContent = "获取中...";
+    button.textContent = "获取中";
     try {
       const playerResponse = getPlayerResponse();
       if (!playerResponse) {
@@ -1556,7 +1555,6 @@
         // 触发字幕，复用 YT 自己的 timedtext 请求 URL（含 pot），不需要播放器数据
         logMsg("YT 下载: 播放器数据过期（SPA 切换），改用 timedtext 缓存路径");
         if (await tryCachedTimedtext(getYoutubeVideoId(), closeAfter)) return;
-        logMsg("YT 下载: 未获取到播放器数据（无 timedtext 缓存）");
         logMsg("YT 下载: 未获取到播放器数据（无 timedtext 缓存）");
         alert("未获取到播放器数据，请刷新页面后重试");
         return;
@@ -1669,7 +1667,7 @@
 
   // 启动日志：确认脚本加载、配置与关键钩子状态（出问题先看这一行）
   logMsg(
-    "SRT 助手已加载 | 自动填空 srt/md: " +
+    "SRT 助手已加载 | 自动填空 SRT/MD: " +
       autoFillEnabled +
       "/" +
       mdAutoFillEnabled +
@@ -1680,6 +1678,5 @@
       " | XHR 钩子: " +
       !!unsafeWindow.XMLHttpRequest,
   );
-  // 面板首次构建（状态刷新已并入 logMsg）
   if (location.hostname === "chat.deepseek.com") buildPanel();
 })();
